@@ -1,0 +1,13 @@
+services:
+  reddotrelay:
+    build: .
+    restart: unless-stopped
+    command: ["-config", "/etc/reddotrelay/config.yaml"]
+    volumes:
+      - ./config.docker.yaml:/etc/reddotrelay/config.yaml:ro
+      - reddotrelay-data:/var/lib/reddotrelay
+    ports:
+      - "8080:8080"
+
+volumes:
+  reddotrelay-data:

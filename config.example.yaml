@@ -1,0 +1,37 @@
+environment:
+  # Displayed in the management UI and build-information API.
+  name: Local Engine
+
+server:
+  listen_address: ":8080"
+  ui_directory: /ui
+  # Set true when HTTPS is terminated by a trusted reverse proxy.
+  ui_secure_cookies: false
+
+log:
+  level: info
+  format: json
+
+storage:
+  path: /var/lib/reddotrelay/reddotrelay.db
+
+# Required only when admin-managed RPC credentials are configured.
+# security:
+#   rpc_credentials_key_ref: env://REDDOTRELAY_RPC_CREDENTIALS_KEY
+
+delivery:
+  workers: 4
+  batch_size: 32
+  http_timeout: 10s
+  lease_duration: 30s
+  retry_backoff: 1s
+  max_backoff: 5m
+  max_attempts: 20
+  poll_interval: 1s
+
+# Disabled when omitted. Only events whose every destination was delivered
+# before the cutoff are eligible; pending and dead deliveries remain.
+# retention:
+#   delivered_for: 720h
+#   poll_interval: 1h
+#   batch_size: 1000

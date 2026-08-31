@@ -1,0 +1,19 @@
+{
+  "name": "reddotrelay-ui",
+  "private": true,
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/dashboard-status.test.ts"
+  },
+  "dependencies": {
+    "preact": "10.29.8"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.9",
+    "typescript": "5.9.2"
+  }
+}

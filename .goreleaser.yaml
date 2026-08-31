@@ -1,0 +1,63 @@
+version: 2
+
+project_name: reddotrelay
+
+builds:
+  - id: reddotrelay
+    main: ./cmd/reddotrelay
+    binary: reddotrelay
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.buildDate={{.Date}}
+
+archives:
+  - id: portable
+    ids: [reddotrelay]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - src: config.release.yaml
+        dst: config.yaml
+      - src: ui/dist/index.html
+        dst: ui/index.html
+      - src: ui/dist/assets/*
+        dst: ui/assets
+        strip_parent: true
+      - LICENSE
+      - LICENSES/**/*
+      - NOTICE
+      - THIRD_PARTY_NOTICES.md
+      - SECURITY.md
+      - SUPPORT.md
+      - api/openapi.yaml
+      - docs/*.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - id: archive-sboms
+    artifacts: archive
+    documents: ["${artifact}.spdx.json"]
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+release:
+  draft: true
+  prerelease: auto
+  mode: replace

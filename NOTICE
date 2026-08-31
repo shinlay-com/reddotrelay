@@ -1,0 +1,13 @@
+RedDotRelay Engine
+Copyright 2026 RedDotRelay contributors
+
+This product includes software developed by third parties. See
+THIRD_PARTY_NOTICES.md, LICENSES/, and the release SBOM for license and
+attribution information.
+
+RedDotRelay imports go-ethereum library packages licensed under the GNU Lesser
+General Public License, version 3 or later. Corresponding source and build
+instructions are available in the RedDotRelay source release. The exact module
+versions and checksums are recorded in go.mod and go.sum so recipients can
+replace go-ethereum with a modified, interface-compatible version and rebuild
+the combined executable.

@@ -1,0 +1,818 @@
+openapi: 3.1.0
+info:
+  title: RedDotRelay Operations API
+  version: 0.3.0
+  description: |-
+    Authenticated desired-state management and public production operations for RedDotRelay.
+    Mutations require the current strong configuration ETag in If-Match.
+    The embedded UI authenticates local users; programmatic clients use API keys.
+    Browser sessions require the X-CSRF-Token response value on mutations.
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+servers:
+  - url: http://127.0.0.1:8080
+tags:
+  - name: Health
+  - name: Observability
+  - name: Authentication
+  - name: Configuration
+  - name: Operations
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      security: []
+      responses:
+        '200': {description: SQLite is reachable, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+        '503': {description: SQLite is unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      security: []
+      responses:
+        '200': {description: Desired scanner state is reconciled, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+        '503': {description: Initial reconciliation or a desired runtime is unavailable, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+  /metrics:
+    get:
+      tags: [Observability]
+      operationId: getMetrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus text exposition
+          content:
+            text/plain:
+              schema: {type: string}
+  /api/v1/ui-setup:
+    get:
+      tags: [Authentication]
+      operationId: getUISetup
+      security: []
+      responses:
+        '200': {description: Whether initial administrator setup is required, content: {application/json: {schema: {type: object, required: [required], properties: {required: {type: boolean}}}}}}
+    post:
+      tags: [Authentication]
+      operationId: createInitialAdmin
+      security: []
+      parameters: [{$ref: '#/components/parameters/SameOrigin'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UserCredentials'}}}}
+      responses:
+        '201': {description: Initial administrator created}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: Initial setup already completed}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /api/v1/ui-session:
+    post:
+      tags: [Authentication]
+      operationId: createUISession
+      security: []
+      description: Authenticates a local user and creates an HttpOnly, SameSite=Strict browser session.
+      parameters: [{$ref: '#/components/parameters/SameOrigin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UISessionLogin'}}}
+      responses:
+        '201': {description: Browser session created, headers: {Set-Cookie: {schema: {type: string}}}, content: {application/json: {schema: {$ref: '#/components/schemas/UISession'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    get:
+      tags: [Authentication]
+      operationId: getUISession
+      security: [{uiSession: []}]
+      responses:
+        '200': {description: Current browser session, content: {application/json: {schema: {$ref: '#/components/schemas/UISession'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    delete:
+      tags: [Authentication]
+      operationId: deleteUISession
+      security: [{uiSession: []}]
+      parameters: [{$ref: '#/components/parameters/SameOrigin'}, {$ref: '#/components/parameters/CSRFToken'}]
+      responses:
+        '204': {description: Browser session deleted}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/users:
+    get:
+      tags: [Authentication]
+      operationId: listUsers
+      responses: {'200': {description: Local users}, '401': {$ref: '#/components/responses/Unauthorized'}, '403': {$ref: '#/components/responses/Forbidden'}}
+    post:
+      tags: [Authentication]
+      operationId: createUser
+      requestBody: {required: true, content: {application/json: {schema: {allOf: [{$ref: '#/components/schemas/UserCredentials'}, {type: object, required: [confirm], properties: {confirm: {const: true}}}]}}}}
+      responses: {'201': {description: Read-only local user created}, '400': {$ref: '#/components/responses/BadRequest'}, '401': {$ref: '#/components/responses/Unauthorized'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /api/v1/users/{userId}/{operation}:
+    post:
+      tags: [Authentication]
+      operationId: updateUser
+      parameters: [{name: userId, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}, {name: operation, in: path, required: true, schema: {type: string, enum: [enabled, password, role]}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [confirm], properties: {enabled: {type: boolean}, password: {type: string, writeOnly: true}, role: {type: string, enum: [admin, read-only]}, confirm: {const: true}}}}}}
+      responses: {'204': {description: User updated}, '400': {$ref: '#/components/responses/BadRequest'}, '401': {$ref: '#/components/responses/Unauthorized'}, '403': {$ref: '#/components/responses/Forbidden'}, '404': {$ref: '#/components/responses/NotFound'}}
+  /api/v1/api-keys:
+    get:
+      tags: [Authentication]
+      operationId: listAPIKeys
+      responses: {'200': {description: Programmatic API keys without secrets}, '401': {$ref: '#/components/responses/Unauthorized'}, '403': {$ref: '#/components/responses/Forbidden'}}
+    post:
+      tags: [Authentication]
+      operationId: createAPIKey
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [name, confirm], properties: {name: {type: string, minLength: 1}, confirm: {const: true}}}}}}
+      responses: {'201': {description: Read-only API key created; secret returned once}, '400': {$ref: '#/components/responses/BadRequest'}, '401': {$ref: '#/components/responses/Unauthorized'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /api/v1/api-keys/{keyId}/{operation}:
+    post:
+      tags: [Authentication]
+      operationId: updateAPIKey
+      parameters: [{name: keyId, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}, {name: operation, in: path, required: true, schema: {type: string, enum: [revoke, role]}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [confirm], properties: {role: {type: string, enum: [admin, read-only]}, confirm: {const: true}}}}}}
+      responses: {'204': {description: API key updated}, '400': {$ref: '#/components/responses/BadRequest'}, '401': {$ref: '#/components/responses/Unauthorized'}, '403': {$ref: '#/components/responses/Forbidden'}, '404': {$ref: '#/components/responses/NotFound'}}
+  /api/v1/connection-tests/rpc:
+    post:
+      tags: [Operations]
+      operationId: testRPCConnection
+      description: Resolves the proposed RPC locator, applies its TLS settings, and calls eth_chainId without persisting the request.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RPCConnectionTest'}}}}
+      responses:
+        '200': {description: RPC endpoint returned a valid chain ID, content: {application/json: {schema: {$ref: '#/components/schemas/RPCConnectionTestResult'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '502': {description: Safe connectivity failure, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/connection-tests/webhook:
+    post:
+      tags: [Operations]
+      operationId: testWebhookConnection
+      description: Sends a synthetic reddotrelay.test payload with optional production-format HMAC headers. Redirects are not followed and response bodies are discarded.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/WebhookConnectionTest'}}}}
+      responses:
+        '200': {description: Webhook endpoint was reached, content: {application/json: {schema: {$ref: '#/components/schemas/WebhookConnectionTestResult'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '502': {description: Safe connectivity failure, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/rpc-listeners:
+    get:
+      tags: [Configuration]
+      operationId: listRPCListeners
+      responses:
+        '200':
+          description: Complete desired configuration snapshot
+          headers: {ETag: {$ref: '#/components/headers/RevisionETag'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/RPCListenerListResponse'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Configuration]
+      operationId: createRPCListener
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RPCListenerCreate'}}}
+      responses:
+        '201':
+          description: RPC listener created atomically
+          headers: {ETag: {$ref: '#/components/headers/RevisionETag'}, Location: {schema: {type: string}}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/RPCListenerMutationResponse'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '412': {$ref: '#/components/responses/RevisionConflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '428': {$ref: '#/components/responses/PreconditionRequired'}
+  /api/v1/rpc-listeners/{rpcListenerId}:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}]
+    get:
+      tags: [Configuration]
+      operationId: getRPCListener
+      responses:
+        '200': {description: One RPC listener aggregate, headers: {ETag: {$ref: '#/components/headers/RevisionETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/RPCListenerMutationResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [Configuration]
+      operationId: patchRPCListener
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {$ref: '#/components/requestBodies/RPCListenerPatchBody'}
+      responses: {'200': {description: RPC listener updated}, default: {$ref: '#/components/responses/BadRequest'}}
+    delete:
+      tags: [Configuration]
+      operationId: deleteRPCListener
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      responses: {'204': {description: RPC listener deleted}, default: {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/rpc-listeners/webhooks:
+    post:
+      tags: [Configuration]
+      operationId: createGlobalWebhook
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {$ref: '#/components/requestBodies/WebhookCreate'}
+      responses: {'201': {description: Webhook created}, default: {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/rpc-listeners/{rpcListenerId}/pause:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}]
+    post:
+      tags: [Operations]
+      operationId: pauseRPCListener
+      description: Durably stops new RPC scanning for the RPC listener. Already-durable webhook deliveries continue processing.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      responses: {'200': {description: RPC listener paused or already paused, headers: {ETag: {$ref: '#/components/headers/RevisionETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/RPCListenerMutationResponse'}}}}, default: {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/rpc-listeners/{rpcListenerId}/resume:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}]
+    post:
+      tags: [Operations]
+      operationId: resumeRPCListener
+      description: Durably enables RPC scanning from the existing checkpoint.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      responses: {'200': {description: RPC listener resumed or already active, headers: {ETag: {$ref: '#/components/headers/RevisionETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/RPCListenerMutationResponse'}}}}, default: {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/rpc-listeners/webhooks/{webhookId}:
+    parameters: [{$ref: '#/components/parameters/WebhookID'}]
+    patch:
+      tags: [Configuration]
+      operationId: patchGlobalWebhook
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {$ref: '#/components/requestBodies/WebhookPatch'}
+      responses: {'200': {description: Webhook updated}, default: {$ref: '#/components/responses/BadRequest'}}
+    delete:
+      tags: [Configuration]
+      operationId: deleteGlobalWebhook
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      responses: {'204': {description: Webhook deleted}, default: {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/rpc-listeners/{rpcListenerId}/webhooks:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}]
+    post:
+      tags: [Configuration]
+      operationId: createChainWebhook
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {$ref: '#/components/requestBodies/WebhookCreate'}
+      responses: {'201': {description: Webhook created}, default: {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/rpc-listeners/{rpcListenerId}/webhooks/{webhookId}:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}, {$ref: '#/components/parameters/WebhookID'}]
+    patch: {tags: [Configuration], operationId: patchChainWebhook, parameters: [{$ref: '#/components/parameters/IfMatch'}], requestBody: {$ref: '#/components/requestBodies/WebhookPatch'}, responses: {'200': {description: Webhook updated}, default: {$ref: '#/components/responses/BadRequest'}}}
+    delete: {tags: [Configuration], operationId: deleteChainWebhook, parameters: [{$ref: '#/components/parameters/IfMatch'}], responses: {'204': {description: Webhook deleted}, default: {$ref: '#/components/responses/BadRequest'}}}
+  /api/v1/rpc-listeners/{rpcListenerId}/contracts:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}]
+    post:
+      tags: [Configuration]
+      operationId: createContract
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ContractCreate'}}}}
+      responses: {'201': {description: Contract created}, default: {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/rpc-listeners/{rpcListenerId}/contracts/{contractId}:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}, {$ref: '#/components/parameters/ContractID'}]
+    patch:
+      tags: [Configuration]
+      operationId: patchContract
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/merge-patch+json: {schema: {$ref: '#/components/schemas/ContractPatch'}}}}
+      responses: {'200': {description: Contract updated}, default: {$ref: '#/components/responses/BadRequest'}}
+    delete: {tags: [Configuration], operationId: deleteContract, parameters: [{$ref: '#/components/parameters/IfMatch'}], responses: {'204': {description: Contract deleted}, default: {$ref: '#/components/responses/BadRequest'}}}
+  /api/v1/rpc-listeners/{rpcListenerId}/contracts/{contractId}/webhooks:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}, {$ref: '#/components/parameters/ContractID'}]
+    post: {tags: [Configuration], operationId: createContractWebhook, parameters: [{$ref: '#/components/parameters/IfMatch'}], requestBody: {$ref: '#/components/requestBodies/WebhookCreate'}, responses: {'201': {description: Webhook created}, default: {$ref: '#/components/responses/BadRequest'}}}
+  /api/v1/rpc-listeners/{rpcListenerId}/contracts/{contractId}/webhooks/{webhookId}:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}, {$ref: '#/components/parameters/ContractID'}, {$ref: '#/components/parameters/WebhookID'}]
+    patch: {tags: [Configuration], operationId: patchContractWebhook, parameters: [{$ref: '#/components/parameters/IfMatch'}], requestBody: {$ref: '#/components/requestBodies/WebhookPatch'}, responses: {'200': {description: Webhook updated}, default: {$ref: '#/components/responses/BadRequest'}}}
+    delete: {tags: [Configuration], operationId: deleteContractWebhook, parameters: [{$ref: '#/components/parameters/IfMatch'}], responses: {'204': {description: Webhook deleted}, default: {$ref: '#/components/responses/BadRequest'}}}
+  /api/v1/rpc-listeners/{rpcListenerId}/contracts/{contractId}/events:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}, {$ref: '#/components/parameters/ContractID'}]
+    post:
+      tags: [Configuration]
+      operationId: createEvent
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/EventCreate'}}}}
+      responses: {'201': {description: Event created}, default: {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/rpc-listeners/{rpcListenerId}/contracts/{contractId}/events/{eventId}:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}, {$ref: '#/components/parameters/ContractID'}, {$ref: '#/components/parameters/EventID'}]
+    patch:
+      tags: [Configuration]
+      operationId: patchEvent
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/merge-patch+json: {schema: {$ref: '#/components/schemas/EventPatch'}}}}
+      responses: {'200': {description: Event updated}, default: {$ref: '#/components/responses/BadRequest'}}
+    delete: {tags: [Configuration], operationId: deleteEvent, parameters: [{$ref: '#/components/parameters/IfMatch'}], responses: {'204': {description: Event deleted}, default: {$ref: '#/components/responses/BadRequest'}}}
+  /api/v1/rpc-listeners/{rpcListenerId}/contracts/{contractId}/events/{eventId}/webhooks:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}, {$ref: '#/components/parameters/ContractID'}, {$ref: '#/components/parameters/EventID'}]
+    post: {tags: [Configuration], operationId: createEventWebhook, parameters: [{$ref: '#/components/parameters/IfMatch'}], requestBody: {$ref: '#/components/requestBodies/WebhookCreate'}, responses: {'201': {description: Webhook created}, default: {$ref: '#/components/responses/BadRequest'}}}
+  /api/v1/rpc-listeners/{rpcListenerId}/contracts/{contractId}/events/{eventId}/webhooks/{webhookId}:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}, {$ref: '#/components/parameters/ContractID'}, {$ref: '#/components/parameters/EventID'}, {$ref: '#/components/parameters/WebhookID'}]
+    patch: {tags: [Configuration], operationId: patchEventWebhook, parameters: [{$ref: '#/components/parameters/IfMatch'}], requestBody: {$ref: '#/components/requestBodies/WebhookPatch'}, responses: {'200': {description: Webhook updated}, default: {$ref: '#/components/responses/BadRequest'}}}
+    delete: {tags: [Configuration], operationId: deleteEventWebhook, parameters: [{$ref: '#/components/parameters/IfMatch'}], responses: {'204': {description: Webhook deleted}, default: {$ref: '#/components/responses/BadRequest'}}}
+  /api/v1/rpc-listener-status:
+    get:
+      tags: [Operations]
+      operationId: getRPCListenerStatus
+      responses:
+        '200': {description: Desired revision and live runtime convergence, content: {application/json: {schema: {$ref: '#/components/schemas/RuntimeStatus'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/rpc-listener-export:
+    get:
+      tags: [Operations]
+      operationId: exportRPCListeneruration
+      description: Returns a deterministic desired-state document. Refuses direct URLs with userinfo, non-root paths, queries, or fragments.
+      responses:
+        '200': {description: Secret-safe desired-state document, headers: {ETag: {$ref: '#/components/headers/RevisionETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationDocument'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: A direct URL is not safe to export; replace it with a secret reference, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  /api/v1/rpc-listener-import:
+    put:
+      tags: [Operations]
+      operationId: importRPCListeneruration
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationDocument'}}}}
+      responses:
+        '200': {description: Complete desired state replaced in one transaction, headers: {ETag: {$ref: '#/components/headers/RevisionETag'}}, content: {application/json: {schema: {type: object, required: [revision, rpcListeners, globalWebhooks], properties: {revision: {type: integer, format: uint64}, rpcListeners: {type: integer}, globalWebhooks: {type: integer}}}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '412': {$ref: '#/components/responses/RevisionConflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '428': {$ref: '#/components/responses/PreconditionRequired'}
+  /api/v1/rpc-listener-audit:
+    get:
+      tags: [Operations]
+      operationId: listRPCListenerAudit
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: before, in: query, schema: {type: integer, minimum: 1}}
+      responses:
+        '200': {description: Newest-first audit page, content: {application/json: {schema: {$ref: '#/components/schemas/AuditPage'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/operational-events:
+    get:
+      tags: [Observability]
+      operationId: listOperationalEvents
+      description: Returns newest-first, bounded in-memory events from an explicit allowlist of secret-safe structured log records. Events reset when the process restarts.
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: before, in: query, schema: {type: integer, minimum: 1}}
+        - {name: level, in: query, schema: {type: string, enum: [info, warn, error]}}
+        - {name: component, in: query, schema: {type: string, enum: [server, scanner, delivery]}}
+      responses:
+        '200': {description: Operational event page, content: {application/json: {schema: {$ref: '#/components/schemas/OperationalEventPage'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/events:
+    get:
+      tags: [Operations]
+      operationId: listEventHistory
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: before, in: query, schema: {type: string, description: Opaque event cursor}}
+        - {name: chainId, in: query, schema: {type: integer, format: uint64, minimum: 1}}
+        - {name: transactionHash, in: query, schema: {type: string, pattern: '^0x[0-9a-fA-F]{64}$'}}
+        - {name: blockNumber, in: query, schema: {type: integer, format: uint64}}
+        - {name: contractAddress, in: query, schema: {type: string, pattern: '^0x[0-9a-fA-F]{40}$'}}
+        - {name: eventSignature, in: query, schema: {type: string}}
+        - {name: deliveryStatus, in: query, schema: {type: string, enum: [pending, delivered, dead]}}
+      responses:
+        '200': {description: Bounded newest-first event history, content: {application/json: {schema: {$ref: '#/components/schemas/EventHistoryPage'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/events/{eventId}/deliveries:
+    get:
+      tags: [Operations]
+      operationId: listEventDeliveries
+      parameters:
+        - {$ref: '#/components/parameters/EventID'}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: after, in: query, schema: {$ref: '#/components/schemas/UUID'}}
+      responses:
+        '200': {description: Bounded per-destination delivery state, content: {application/json: {schema: {$ref: '#/components/schemas/DeliveryPage'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/deliveries/{deliveryId}/requeue:
+    post:
+      tags: [Operations]
+      operationId: requeueDeadDelivery
+      parameters: [{$ref: '#/components/parameters/DeliveryID'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [confirm], properties: {confirm: {const: true}}}}}}
+      responses:
+        '200': {description: Delivery requeued, content: {application/json: {schema: {$ref: '#/components/schemas/RequeueResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+  /api/v1/delivery-requeue-audit:
+    get:
+      tags: [Operations]
+      operationId: listDeliveryRequeueAudit
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: before, in: query, schema: {type: integer, format: uint64, minimum: 1}}
+      responses:
+        '200': {description: Newest-first requeue audit page, content: {application/json: {schema: {$ref: '#/components/schemas/DeliveryRequeueAuditPage'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/scanner-progress:
+    get:
+      tags: [Operations]
+      operationId: getScannerProgress
+      responses:
+        '200': {description: Last observed scanner head and durable checkpoint progress, content: {application/json: {schema: {$ref: '#/components/schemas/ScannerProgressResponse'}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/build-info:
+    get:
+      tags: [Operations]
+      operationId: getBuildInfo
+      responses:
+        '200': {description: Engine build and environment metadata, content: {application/json: {schema: {type: object, required: [version, commit, buildDate, environmentName], properties: {version: {type: string}, commit: {type: string}, buildDate: {type: string}, environmentName: {type: string}}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/storage/status:
+    get:
+      tags: [Operations]
+      operationId: getStorageStatus
+      responses:
+        '200': {description: SQLite and database-volume usage}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/storage/optimize:
+    post:
+      tags: [Operations]
+      operationId: optimizeStorage
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [confirm], properties: {confirm: {const: true}}}}}}
+      responses:
+        '204': {description: WAL checkpoint and SQLite optimize completed}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/retention/status:
+    get:
+      tags: [Operations]
+      operationId: getRetentionStatus
+      responses:
+        '200': {description: Automatic policy and runtime cleanup status}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/retention/preview:
+    post:
+      tags: [Operations]
+      operationId: previewRetention
+      requestBody: {$ref: '#/components/requestBodies/RetentionRequest'}
+      responses:
+        '200': {description: Eligible completed-event count}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/retention/prune:
+    post:
+      tags: [Operations]
+      operationId: pruneRetention
+      requestBody: {$ref: '#/components/requestBodies/RetentionRequest'}
+      responses:
+        '200': {description: Completed retention result}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: Cleanup already running}
+  /api/v1/retention/config:
+    post:
+      tags: [Operations]
+      operationId: configureRetention
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [enabled, confirm], properties: {enabled: {type: boolean}, deliveredFor: {type: string, examples: [720h]}, pollInterval: {type: string, examples: [1h]}, batchSize: {type: integer, minimum: 1, maximum: 10000}, confirm: {const: true}}}}}}
+      responses:
+        '200': {description: Persisted automatic-retention policy}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: api_key}
+    uiSession: {type: apiKey, in: cookie, name: reddotrelay_ui_session}
+  parameters:
+    IfMatch: {name: If-Match, in: header, required: true, description: 'Strong revision ETag, for example "revision-12".', schema: {type: string, pattern: '^"revision-[0-9]+"$'}}
+    CSRFToken: {name: X-CSRF-Token, in: header, required: true, description: Token returned in the current UI session response., schema: {type: string, minLength: 1}}
+    SameOrigin: {name: Origin, in: header, required: true, description: Browser origin whose scheme and authority must exactly match the request host., schema: {type: string, format: uri}}
+    RPCListenerID: {name: rpcListenerId, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+    ContractID: {name: contractId, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+    EventID: {name: eventId, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+    DeliveryID: {name: deliveryId, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+    WebhookID: {name: webhookId, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+  headers:
+    RevisionETag: {description: Current global configuration revision, schema: {type: string, pattern: '^"revision-[0-9]+"$'}}
+  requestBodies:
+    RetentionRequest: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [olderThan], properties: {olderThan: {type: string, examples: [720h]}, batchSize: {type: integer, minimum: 1, maximum: 10000, default: 500}, maxEvents: {type: integer, minimum: 0, default: 0}, confirm: {type: boolean, default: false}}}}}}
+    RPCListenerPatchBody: {required: true, content: {application/merge-patch+json: {schema: {$ref: '#/components/schemas/RPCListenerPatch'}}}}
+    WebhookCreate: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/WebhookCreate'}}}}
+    WebhookPatch: {required: true, content: {application/merge-patch+json: {schema: {$ref: '#/components/schemas/WebhookPatch'}}}}
+  responses:
+    BadRequest: {description: Malformed route, ETag, query, or JSON, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unauthorized: {description: Missing or invalid API key or UI session, headers: {WWW-Authenticate: {schema: {type: string}}}, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Forbidden: {description: Principal lacks the required role or same-origin/CSRF proof, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: Resource not found, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    RevisionConflict: {description: If-Match does not equal the durable revision, headers: {ETag: {$ref: '#/components/headers/RevisionETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unprocessable: {description: Proposed complete configuration is invalid, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    PreconditionRequired: {description: If-Match is required, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    TooManyRequests: {description: Authentication attempts are temporarily throttled, headers: {Retry-After: {schema: {type: integer, minimum: 1}, description: Seconds until another attempt is allowed}}, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  x-responses:
+    createWebhook:
+      '201': {description: Webhook created, headers: {ETag: {$ref: '#/components/headers/RevisionETag'}, Location: {schema: {type: string}}}, content: {application/json: {schema: {$ref: '#/components/schemas/WebhookMutationResponse'}}}}
+      '400': {$ref: '#/components/responses/BadRequest'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+      '403': {$ref: '#/components/responses/Forbidden'}
+      '412': {$ref: '#/components/responses/RevisionConflict'}
+      '422': {$ref: '#/components/responses/Unprocessable'}
+      '428': {$ref: '#/components/responses/PreconditionRequired'}
+    patchWebhook:
+      '200': {description: Webhook updated, headers: {ETag: {$ref: '#/components/headers/RevisionETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/WebhookMutationResponse'}}}}
+      '400': {$ref: '#/components/responses/BadRequest'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+      '403': {$ref: '#/components/responses/Forbidden'}
+      '404': {$ref: '#/components/responses/NotFound'}
+      '412': {$ref: '#/components/responses/RevisionConflict'}
+      '422': {$ref: '#/components/responses/Unprocessable'}
+      '428': {$ref: '#/components/responses/PreconditionRequired'}
+    patchRPCListener:
+      '200': {description: RPC listener updated, headers: {ETag: {$ref: '#/components/headers/RevisionETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/RPCListenerMutationResponse'}}}}
+      '400': {$ref: '#/components/responses/BadRequest'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+      '403': {$ref: '#/components/responses/Forbidden'}
+      '404': {$ref: '#/components/responses/NotFound'}
+      '412': {$ref: '#/components/responses/RevisionConflict'}
+      '422': {$ref: '#/components/responses/Unprocessable'}
+      '428': {$ref: '#/components/responses/PreconditionRequired'}
+    createContract: {'201': {description: Contract created}, '400': {$ref: '#/components/responses/BadRequest'}, '401': {$ref: '#/components/responses/Unauthorized'}, '403': {$ref: '#/components/responses/Forbidden'}, '412': {$ref: '#/components/responses/RevisionConflict'}, '422': {$ref: '#/components/responses/Unprocessable'}, '428': {$ref: '#/components/responses/PreconditionRequired'}}
+    patchContract: {'200': {description: Contract updated}, '400': {$ref: '#/components/responses/BadRequest'}, '401': {$ref: '#/components/responses/Unauthorized'}, '403': {$ref: '#/components/responses/Forbidden'}, '404': {$ref: '#/components/responses/NotFound'}, '412': {$ref: '#/components/responses/RevisionConflict'}, '422': {$ref: '#/components/responses/Unprocessable'}, '428': {$ref: '#/components/responses/PreconditionRequired'}}
+    createEvent: {'201': {description: Event created}, '400': {$ref: '#/components/responses/BadRequest'}, '401': {$ref: '#/components/responses/Unauthorized'}, '403': {$ref: '#/components/responses/Forbidden'}, '412': {$ref: '#/components/responses/RevisionConflict'}, '422': {$ref: '#/components/responses/Unprocessable'}, '428': {$ref: '#/components/responses/PreconditionRequired'}}
+    patchEvent: {'200': {description: Event updated}, '400': {$ref: '#/components/responses/BadRequest'}, '401': {$ref: '#/components/responses/Unauthorized'}, '403': {$ref: '#/components/responses/Forbidden'}, '404': {$ref: '#/components/responses/NotFound'}, '412': {$ref: '#/components/responses/RevisionConflict'}, '422': {$ref: '#/components/responses/Unprocessable'}, '428': {$ref: '#/components/responses/PreconditionRequired'}}
+    delete:
+      '204': {description: Resource deleted, headers: {ETag: {$ref: '#/components/headers/RevisionETag'}, X-Config-Revision: {schema: {type: integer, format: uint64}}}}
+      '400': {$ref: '#/components/responses/BadRequest'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+      '403': {$ref: '#/components/responses/Forbidden'}
+      '404': {$ref: '#/components/responses/NotFound'}
+      '412': {$ref: '#/components/responses/RevisionConflict'}
+      '422': {$ref: '#/components/responses/Unprocessable'}
+      '428': {$ref: '#/components/responses/PreconditionRequired'}
+  schemas:
+    RPCConnectionTest:
+      type: object
+      additionalProperties: false
+      properties: {rpcUrl: {type: string, format: uri, pattern: '^https?://'}, rpcUrlRef: {$ref: '#/components/schemas/SecretReference'}, rpcAuthentication: {$ref: '#/components/schemas/RPCAuthenticationCreate'}, tls: {$ref: '#/components/schemas/TLS'}}
+      oneOf: [{required: [rpcUrl]}, {required: [rpcUrlRef]}]
+    RPCConnectionTestResult: {type: object, additionalProperties: false, required: [reachable, chainId], properties: {reachable: {const: true}, chainId: {type: integer, format: uint64, minimum: 1}}}
+    WebhookConnectionTest:
+      type: object
+      additionalProperties: false
+      properties: {url: {type: string, format: uri, pattern: '^https?://'}, urlRef: {$ref: '#/components/schemas/SecretReference'}, authentication: {$ref: '#/components/schemas/HMACAuthentication'}}
+      oneOf: [{required: [url]}, {required: [urlRef]}]
+    WebhookConnectionTestResult: {type: object, additionalProperties: false, required: [reachable, accepted, statusCode], properties: {reachable: {const: true}, accepted: {type: boolean}, statusCode: {type: integer, minimum: 100, maximum: 599}}}
+    UISessionLogin:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties: {username: {type: string, minLength: 1}, password: {type: string, minLength: 1, writeOnly: true}}
+    UserCredentials:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties: {username: {type: string, minLength: 1}, password: {type: string, minLength: 1, writeOnly: true}}
+    UISession:
+      type: object
+      additionalProperties: false
+      required: [name, role, csrfToken, expiresAt]
+      properties:
+        name: {type: string, minLength: 1}
+        role: {type: string, enum: [admin, read-only]}
+        csrfToken: {type: string, minLength: 1}
+        expiresAt: {type: string, format: date-time}
+    UUID: {type: string, format: uuid, pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'}
+    Error: {type: object, additionalProperties: false, required: [error], properties: {error: {type: string}}}
+    Health: {type: object, additionalProperties: false, required: [status], properties: {status: {type: string, enum: [ok, unhealthy, ready, not_ready]}}}
+    SecretReference: {type: string, pattern: '^(env://[A-Za-z_][A-Za-z0-9_]*|file:///.+)$', examples: [env://CHAIN_RPC_URL, file:///run/secrets/webhook_url]}
+    HMACAuthentication:
+      type: object
+      additionalProperties: false
+      required: [type, secretRef]
+      properties:
+        type: {const: hmac-sha256}
+        secretRef: {$ref: '#/components/schemas/SecretReference'}
+        keyId: {type: string, pattern: '^[A-Za-z0-9._-]{1,128}$'}
+    RPCAuthenticationCreate:
+      type: object
+      additionalProperties: false
+      required: [type, secret]
+      properties:
+        type: {type: string, enum: [basic, bearer, header, engine-jwt, provider-jwt]}
+        username: {type: string}
+        headerName: {type: string}
+        secret: {type: string, writeOnly: true}
+        tokenUrl: {type: string, format: uri, pattern: '^https://'}
+        tokenApiKey: {type: string, writeOnly: true}
+      allOf:
+        - if: {properties: {type: {const: provider-jwt}}}
+          then: {required: [tokenUrl, tokenApiKey]}
+    RPCAuthentication:
+      type: object
+      additionalProperties: false
+      required: [type, secretConfigured]
+      properties: {type: {type: string, enum: [basic, bearer, header, engine-jwt, provider-jwt]}, username: {type: string}, headerName: {type: string}, secretConfigured: {type: boolean}, tokenUrl: {type: string, format: uri}, tokenApiKeyConfigured: {type: boolean}}
+    WebhookCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        url: {type: string, format: uri, pattern: '^https?://'}
+        urlRef: {$ref: '#/components/schemas/SecretReference'}
+        authentication: {$ref: '#/components/schemas/HMACAuthentication'}
+      oneOf: [{required: [url]}, {required: [urlRef]}]
+    WebhookPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        url: {type: string, format: uri, pattern: '^https?://'}
+        urlRef: {$ref: '#/components/schemas/SecretReference'}
+        authentication: {oneOf: [{$ref: '#/components/schemas/HMACAuthentication'}, {type: 'null'}]}
+    Webhook:
+      type: object
+      additionalProperties: false
+      required: [id, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        url: {type: string, format: uri, description: Redacted origin only}
+        urlRef: {$ref: '#/components/schemas/SecretReference'}
+        authentication: {$ref: '#/components/schemas/HMACAuthentication'}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    EventCreate: {type: object, additionalProperties: false, required: [selector], properties: {selector: {type: string}, webhooks: {type: array, items: {$ref: '#/components/schemas/WebhookCreate'}}}}
+    EventPatch: {type: object, additionalProperties: false, minProperties: 1, properties: {selector: {type: string}}}
+    ContractCreate: {type: object, additionalProperties: false, required: [address, abi], properties: {address: {type: string, pattern: '^0x[0-9a-fA-F]{40}$'}, abi: {}, webhooks: {type: array, items: {$ref: '#/components/schemas/WebhookCreate'}}, events: {type: array, items: {$ref: '#/components/schemas/EventCreate'}}}}
+    ContractPatch: {type: object, additionalProperties: false, minProperties: 1, properties: {address: {type: string, pattern: '^0x[0-9a-fA-F]{40}$'}, abi: {}, eventSelectors: {type: array, uniqueItems: true, items: {type: string, minLength: 1}}}}
+    TLS: {type: object, additionalProperties: false, properties: {caPem: {type: string}, serverName: {type: string}, insecureSkipVerify: {type: boolean, default: false}}}
+    RPCListenerCreate:
+      type: object
+      additionalProperties: false
+      required: [name, chainId, startBlock, batchSize, pollInterval, confirmations, reorgDepth, rpcRetryAttempts, rpcRetryBackoff, rpcTimeout]
+      properties:
+        name: {type: string, minLength: 1}
+        chainId: {type: integer, format: uint64, minimum: 1, maximum: 9223372036854775807}
+        rpcUrl: {type: string, format: uri, pattern: '^https?://'}
+        rpcUrlRef: {$ref: '#/components/schemas/SecretReference'}
+        rpcAuthentication: {$ref: '#/components/schemas/RPCAuthenticationCreate'}
+        startBlock: {type: integer, format: uint64, minimum: 0}
+        batchSize: {type: integer, format: uint64, minimum: 1}
+        pollInterval: {$ref: '#/components/schemas/Duration'}
+        confirmations: {type: integer, format: uint64, minimum: 0}
+        reorgDepth: {type: integer, format: uint64, minimum: 1}
+        rpcRetryAttempts: {type: integer, minimum: 1}
+        rpcRetryBackoff: {$ref: '#/components/schemas/Duration'}
+        rpcTimeout: {$ref: '#/components/schemas/Duration'}
+        tls: {$ref: '#/components/schemas/TLS'}
+        webhooks: {type: array, items: {$ref: '#/components/schemas/WebhookCreate'}}
+        contracts: {type: array, items: {$ref: '#/components/schemas/ContractCreate'}}
+      oneOf: [{required: [rpcUrl]}, {required: [rpcUrlRef]}]
+    RPCListenerPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: {type: string}
+        chainId: {type: integer, format: uint64}
+        rpcUrl: {type: string, format: uri, pattern: '^https?://'}
+        rpcUrlRef: {$ref: '#/components/schemas/SecretReference'}
+        rpcAuthentication: {oneOf: [{$ref: '#/components/schemas/RPCAuthenticationCreate'}, {type: 'null'}]}
+        startBlock: {type: integer, format: uint64}
+        batchSize: {type: integer, format: uint64}
+        pollInterval: {$ref: '#/components/schemas/Duration'}
+        confirmations: {type: integer, format: uint64}
+        reorgDepth: {type: integer, format: uint64}
+        rpcRetryAttempts: {type: integer}
+        rpcRetryBackoff: {$ref: '#/components/schemas/Duration'}
+        rpcTimeout: {$ref: '#/components/schemas/Duration'}
+        tls: {$ref: '#/components/schemas/TLS'}
+    Duration: {type: string, pattern: '^[0-9]+(ns|us|µs|ms|s|m|h)([0-9]+(ns|us|µs|ms|s|m|h))*$'}
+    Event:
+      type: object
+      additionalProperties: false
+      required: [id, selector, webhooks, effectiveWebhooks, webhookSource, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        selector: {type: string}
+        webhooks: {type: array, items: {$ref: '#/components/schemas/Webhook'}}
+        effectiveWebhooks: {type: array, items: {$ref: '#/components/schemas/Webhook'}}
+        webhookSource: {type: string, enum: [event, contract, chain, global, none]}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    Contract:
+      type: object
+      additionalProperties: false
+      required: [id, address, abi, webhooks, events, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        address: {type: string, pattern: '^0x[0-9a-fA-F]{40}$'}
+        abi: {}
+        webhooks: {type: array, items: {$ref: '#/components/schemas/Webhook'}}
+        events: {type: array, items: {$ref: '#/components/schemas/Event'}}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    RPCListener:
+      type: object
+      description: Complete nested RPC listener representation; secret-bearing direct URLs are reduced to origins.
+      additionalProperties: false
+      required: [id, name, paused, chainId, startBlock, batchSize, pollInterval, confirmations, reorgDepth, rpcRetryAttempts, rpcRetryBackoff, rpcTimeout, tls, webhooks, contracts, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        name: {type: string}
+        paused: {type: boolean}
+        chainId: {type: integer, format: uint64}
+        rpcUrl: {type: string, format: uri, description: Redacted origin only}
+        rpcUrlRef: {$ref: '#/components/schemas/SecretReference'}
+        rpcAuthentication: {$ref: '#/components/schemas/RPCAuthentication'}
+        startBlock: {type: integer, format: uint64}
+        batchSize: {type: integer, format: uint64}
+        pollInterval: {$ref: '#/components/schemas/Duration'}
+        confirmations: {type: integer, format: uint64}
+        reorgDepth: {type: integer, format: uint64}
+        rpcRetryAttempts: {type: integer}
+        rpcRetryBackoff: {$ref: '#/components/schemas/Duration'}
+        rpcTimeout: {$ref: '#/components/schemas/Duration'}
+        tls: {$ref: '#/components/schemas/TLS'}
+        webhooks: {type: array, items: {$ref: '#/components/schemas/Webhook'}}
+        contracts: {type: array, items: {$ref: '#/components/schemas/Contract'}}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    RPCListenerListResponse: {type: object, required: [revision, updatedAt, globalWebhooks, rpcListeners], properties: {revision: {type: integer, format: uint64}, updatedAt: {type: string, format: date-time}, globalWebhooks: {type: array, items: {$ref: '#/components/schemas/Webhook'}}, rpcListeners: {type: array, items: {$ref: '#/components/schemas/RPCListener'}}}}
+    RPCListenerMutationResponse: {type: object, required: [revision, rpcListener], properties: {revision: {type: integer, format: uint64}, rpcListener: {$ref: '#/components/schemas/RPCListener'}}}
+    WebhookMutationResponse: {type: object, required: [revision, webhook], properties: {revision: {type: integer, format: uint64}, webhook: {$ref: '#/components/schemas/Webhook'}}}
+    RuntimeStatus: {type: object, additionalProperties: true, required: [desiredRevision, initialReconcileComplete, ready, rpcListeners], properties: {desiredRevision: {type: integer, format: uint64}, initialReconcileComplete: {type: boolean}, lastReconciledAt: {type: string, format: date-time}, ready: {type: boolean}, rpcListeners: {type: array, items: {type: object, additionalProperties: true}}}}
+    AuditPage: {type: object, additionalProperties: true, required: [entries], properties: {entries: {type: array, items: {type: object, additionalProperties: true}}, nextBefore: {type: integer}}}
+    OperationalEvent:
+      type: object
+      additionalProperties: false
+      required: [sequence, timestamp, level, component, message, attributes]
+      properties:
+        sequence: {type: integer, format: uint64, minimum: 1}
+        timestamp: {type: string, format: date-time}
+        level: {type: string, enum: [info, warn, error]}
+        component: {type: string, enum: [server, scanner, delivery]}
+        message: {type: string}
+        attributes: {type: object, additionalProperties: true}
+    OperationalEventPage: {type: object, additionalProperties: false, required: [entries], properties: {entries: {type: array, items: {$ref: '#/components/schemas/OperationalEvent'}}, nextBefore: {type: string, pattern: '^[1-9][0-9]*$'}}}
+    DeliveryCounts: {type: object, additionalProperties: false, required: [pending, delivered, dead], properties: {pending: {type: integer, minimum: 0}, delivered: {type: integer, minimum: 0}, dead: {type: integer, minimum: 0}}}
+    EventHistoryEntry: {type: object, additionalProperties: false, required: [id, chainId, transactionHash, logIndex, blockNumber, blockHash, contractAddress, eventName, eventSignature, observedAt, deliveries], properties: {id: {$ref: '#/components/schemas/UUID'}, chainId: {type: integer, format: uint64}, transactionHash: {type: string}, logIndex: {type: integer, format: uint64}, blockNumber: {type: integer, format: uint64}, blockHash: {type: string}, contractAddress: {type: string}, eventName: {type: string}, eventSignature: {type: string}, observedAt: {type: string, format: date-time}, deliveries: {$ref: '#/components/schemas/DeliveryCounts'}}}
+    EventHistoryPage: {type: object, additionalProperties: false, required: [entries], properties: {entries: {type: array, items: {$ref: '#/components/schemas/EventHistoryEntry'}}, nextBefore: {type: string}}}
+    DeliveryDiagnostic: {type: object, additionalProperties: false, required: [id, destination, status, attempts, totalAttempts, nextAttempt], properties: {id: {$ref: '#/components/schemas/UUID'}, destination: {type: string, description: Secret reference or redacted direct URL origin}, status: {type: string, enum: [pending, delivered, dead]}, attempts: {type: integer, minimum: 0}, totalAttempts: {type: integer, minimum: 0}, nextAttempt: {type: string, format: date-time}, lastAttemptAt: {type: string, format: date-time}, lastStatusCode: {type: integer, minimum: 100, maximum: 599}, failureSummary: {type: string}, deliveredAt: {type: string, format: date-time}, authentication: {type: string, enum: [hmac-sha256]}, keyId: {type: string}}}
+    DeliveryPage: {type: object, additionalProperties: false, required: [entries], properties: {entries: {type: array, items: {$ref: '#/components/schemas/DeliveryDiagnostic'}}, nextAfter: {$ref: '#/components/schemas/UUID'}}}
+    RequeueResponse: {type: object, additionalProperties: false, required: [deliveryId, eventId, status, auditId], properties: {deliveryId: {$ref: '#/components/schemas/UUID'}, eventId: {$ref: '#/components/schemas/UUID'}, status: {const: pending}, auditId: {$ref: '#/components/schemas/UUID'}}}
+    DeliveryRequeueAuditPage: {type: object, additionalProperties: false, required: [entries], properties: {entries: {type: array, items: {type: object, additionalProperties: false, required: [id, actorId, actorName, actorRole, deliveryId, eventId, previousAttempts, createdAt], properties: {id: {$ref: '#/components/schemas/UUID'}, actorId: {$ref: '#/components/schemas/UUID'}, actorName: {type: string}, actorRole: {const: admin}, deliveryId: {$ref: '#/components/schemas/UUID'}, eventId: {$ref: '#/components/schemas/UUID'}, previousAttempts: {type: integer, minimum: 0}, createdAt: {type: string, format: date-time}}}}, nextBefore: {type: integer, format: uint64}}}
+    ScannerProgressResponse: {type: object, additionalProperties: false, required: [rpcListeners], properties: {rpcListeners: {type: array, items: {type: object, additionalProperties: false, required: [rpcListenerId, chainId, latestBlock, confirmedHead, checkpoint, lagBlocks, updatedAt], properties: {rpcListenerId: {$ref: '#/components/schemas/UUID'}, chainId: {type: integer, format: uint64}, latestBlock: {type: integer, format: uint64}, confirmedHead: {type: integer, format: uint64}, checkpoint: {type: integer, format: uint64}, lagBlocks: {type: integer, format: uint64}, updatedAt: {type: string, format: date-time}}}}}}
+    ConfigurationDocument:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, globalWebhooks, rpcListeners]
+      properties:
+        schemaVersion: {const: reddotrelay.config/v1}
+        globalWebhooks: {type: array, items: {$ref: '#/components/schemas/ConfigurationWebhook'}}
+        rpcListeners: {type: array, items: {$ref: '#/components/schemas/ConfigurationRPCListener'}}
+    ConfigurationWebhook:
+      type: object
+      additionalProperties: false
+      required: [id]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        url: {type: string, format: uri, pattern: '^https?://'}
+        urlRef: {$ref: '#/components/schemas/SecretReference'}
+        authentication: {$ref: '#/components/schemas/HMACAuthentication'}
+      oneOf: [{required: [url]}, {required: [urlRef]}]
+    ConfigurationEvent:
+      type: object
+      additionalProperties: false
+      required: [id, selector, webhooks]
+      properties: {id: {$ref: '#/components/schemas/UUID'}, selector: {type: string}, webhooks: {type: array, items: {$ref: '#/components/schemas/ConfigurationWebhook'}}}
+    ConfigurationContract:
+      type: object
+      additionalProperties: false
+      required: [id, address, abi, webhooks, events]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        address: {type: string, pattern: '^0x[0-9a-fA-F]{40}$'}
+        abi: {}
+        webhooks: {type: array, items: {$ref: '#/components/schemas/ConfigurationWebhook'}}
+        events: {type: array, items: {$ref: '#/components/schemas/ConfigurationEvent'}}
+    ConfigurationRPCListener:
+      type: object
+      additionalProperties: false
+      required: [id, name, paused, chainId, startBlock, batchSize, pollInterval, confirmations, reorgDepth, rpcRetryAttempts, rpcRetryBackoff, rpcTimeout, tls, webhooks, contracts]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        name: {type: string, minLength: 1}
+        paused: {type: boolean}
+        chainId: {type: integer, format: uint64, minimum: 1}
+        rpcUrl: {type: string, format: uri, pattern: '^https?://'}
+        rpcUrlRef: {$ref: '#/components/schemas/SecretReference'}
+        startBlock: {type: integer, format: uint64}
+        batchSize: {type: integer, format: uint64, minimum: 1}
+        pollInterval: {$ref: '#/components/schemas/Duration'}
+        confirmations: {type: integer, format: uint64}
+        reorgDepth: {type: integer, format: uint64, minimum: 1}
+        rpcRetryAttempts: {type: integer, minimum: 1}
+        rpcRetryBackoff: {$ref: '#/components/schemas/Duration'}
+        rpcTimeout: {$ref: '#/components/schemas/Duration'}
+        tls: {$ref: '#/components/schemas/TLS'}
+        webhooks: {type: array, items: {$ref: '#/components/schemas/ConfigurationWebhook'}}
+        contracts: {type: array, items: {$ref: '#/components/schemas/ConfigurationContract'}}
+      oneOf: [{required: [rpcUrl]}, {required: [rpcUrlRef]}]
+security:
+  - bearerAuth: []
+  - uiSession: []
