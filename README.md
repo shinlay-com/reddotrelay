@@ -10,7 +10,23 @@ RedDotRelay is open source under [AGPL-3.0-only](LICENSE). See [third-party noti
 docker compose up --build -d
 ```
 
-Open <http://127.0.0.1:8080/ui/> and create the initial administrator. For a local source build, install Go 1.25+ and Node.js 24+, then run:
+Open <http://127.0.0.1:8080/ui/> and create the initial administrator.
+
+To test the published Docker Hub image instead of building locally:
+
+```powershell
+docker pull shinlay/reddotrelay:latest
+docker volume create reddotrelay-data
+docker run --rm --name reddotrelay `
+  -p 8080:8080 `
+  -v reddotrelay-data:/var/lib/reddotrelay `
+  shinlay/reddotrelay:latest
+```
+
+Check <http://127.0.0.1:8080/healthz>, then open
+<http://127.0.0.1:8080/ui/> to create the initial administrator.
+
+For a local source build, install Go 1.25+ and Node.js 24+, then run:
 
 ```powershell
 Copy-Item config.example.yaml config.yaml
