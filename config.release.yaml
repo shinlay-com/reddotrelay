@@ -1,0 +1,21 @@
+server:
+  listen_address: ":8080"
+  ui_directory: ./ui
+  ui_secure_cookies: false
+
+log:
+  level: info
+  format: json
+
+storage:
+  path: ./reddotrelay.db
+
+delivery:
+  workers: 4
+  batch_size: 20
+  http_timeout: 10s
+  lease_duration: 30s
+  retry_backoff: 1s
+  max_backoff: 1m
+  max_attempts: 10
+  poll_interval: 1s

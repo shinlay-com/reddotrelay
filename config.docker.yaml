@@ -1,0 +1,27 @@
+# Static process configuration for Docker development.
+# RPC listeners are managed through the REST API and stored in SQLite.
+
+environment:
+  name: Dev Env
+
+server:
+  listen_address: ":8080"
+  ui_directory: /ui
+  ui_secure_cookies: false
+
+log:
+  level: info
+  format: json
+
+storage:
+  path: /var/lib/reddotrelay/reddotrelay-dev.db
+
+delivery:
+  workers: 4
+  batch_size: 4
+  http_timeout: 10s
+  lease_duration: 30s
+  retry_backoff: 1s
+  max_backoff: 5m
+  max_attempts: 20
+  poll_interval: 1s

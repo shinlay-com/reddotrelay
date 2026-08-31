@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Validate
+        shell: pwsh
+        run: ./scripts/validate.ps1
+      - name: Check generated diff
+        shell: pwsh
+        run: git diff --exit-code
+      - name: Check whitespace
+        run: git diff --check
+      - name: Go vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: UI dependency audit
+        run: npm --prefix ui audit --audit-level=high

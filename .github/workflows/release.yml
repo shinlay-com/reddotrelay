@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.x'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+      - name: Validate source and dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix ui ci
+          npm --prefix ui run check
+          npm --prefix ui run build
+          npm --prefix ui audit --audit-level=high
+          go mod download
+          pwsh ./scripts/check-third-party-licenses.ps1
+          go test ./...
+          go vet ./...
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+          test -z "$(gofmt -l $(git ls-files '*.go'))"
+      - name: Scan repository history for secrets
+        shell: bash
+        run: docker run --rm --mount "type=bind,source=$PWD,target=/repo,readonly" zricethezav/gitleaks:v8.30.1 detect --source=/repo --no-banner --redact --exit-code=1
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v3.1.1
+      - uses: anchore/sbom-action/download-syft@v0
+        with:
+          syft-version: v1.51.0
+      - name: Build draft release
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.18.0
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sign checksum manifest
+        shell: bash
+        run: |
+          cosign sign-blob --yes \
+            --output-signature dist/checksums.txt.sig \
+            --output-certificate dist/checksums.txt.pem \
+            dist/checksums.txt
+          gh release upload "$GITHUB_REF_NAME" dist/checksums.txt.sig dist/checksums.txt.pem --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attest portable artifacts
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.spdx.json
+            dist/checksums.txt
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: image-tags
+        name: Select image tags
+        shell: bash
+        run: |
+          tags="ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_REF_NAME}"
+          tags+=$'\n'"docker.io/shinlay/reddotrelay:${GITHUB_REF_NAME}"
+          if [[ "$GITHUB_REF_NAME" != *-* ]]; then
+            tags="$tags"$'\n'"ghcr.io/${GITHUB_REPOSITORY}:latest"
+            tags="$tags"$'\n'"docker.io/shinlay/reddotrelay:latest"
+          fi
+          echo 'tags<<EOF' >> "$GITHUB_OUTPUT"
+          echo "$tags" >> "$GITHUB_OUTPUT"
+          echo 'EOF' >> "$GITHUB_OUTPUT"
+      - id: build-metadata
+        name: Capture build metadata
+        shell: bash
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image-tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.build-metadata.outputs.date }}
+          platforms: linux/amd64,linux/arm64
+          provenance: mode=max
+          sbom: true
+      - name: Scan released container
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY}@${{ steps.image.outputs.digest }}"
+          docker pull "$image"
+          docker save -o reddotrelay-release-image.tar "$image"
+          docker run --rm \
+            --mount "type=bind,source=$PWD/reddotrelay-release-image.tar,target=/scan/image.tar,readonly" \
+            aquasec/trivy:0.74.0 image --input /scan/image.tar --scanners vuln \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
+      - name: Sign container digest
+        shell: bash
+        run: |
+          cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY}@${{ steps.image.outputs.digest }}"
+          cosign sign --yes "docker.io/shinlay/reddotrelay@${{ steps.image.outputs.digest }}"
+      - name: Attest container digest
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+      - name: Attest Docker Hub container digest
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: docker.io/shinlay/reddotrelay
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true

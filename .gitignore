@@ -1,0 +1,17 @@
+/reddotrelay
+/reddotrelay.exe
+/config.yaml
+/.cache/
+/.git.codex-repair/
+/data/
+/ui/dist/
+/ui/node_modules/
+/dist/
+/tools/reorg-test/runtime/
+*.db
+*.db-shm
+*.db-wal
+.env
+.idea/
+.vscode/
+coverage.out
