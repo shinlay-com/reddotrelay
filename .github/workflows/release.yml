@@ -51,7 +51,7 @@ jobs:
         run: docker run --rm --mount "type=bind,source=$PWD,target=/repo,readonly" zricethezav/gitleaks:v8.30.1 detect --source=/repo --no-banner --redact --exit-code=1
       - uses: sigstore/cosign-installer@v3
         with:
-          cosign-release: v3.1.1
+          cosign-release: v2.5.2
       - uses: anchore/sbom-action/download-syft@v0
         with:
           syft-version: v1.51.0
