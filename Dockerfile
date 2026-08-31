@@ -5,7 +5,7 @@ RUN npm ci
 COPY ui/ ./
 RUN npm run build
 
-FROM golang:1.25-alpine AS build
+FROM golang:1.27-alpine AS build
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
