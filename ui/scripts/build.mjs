@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,13 +7,18 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 await rm(path.join(root, "dist"), { recursive: true, force: true });
 await mkdir(path.join(root, "dist"), { recursive: true });
+await copyFile(path.join(root, "src", "assets", "favicon-32x32.png"), path.join(root, "dist", "favicon.png"));
+await copyFile(path.join(root, "src", "assets", "apple-touch-icon.png"), path.join(root, "dist", "apple-touch-icon.png"));
 
 const result = await build({
   absWorkingDir: root,
   entryPoints: ["src/app.tsx"],
   outdir: "dist/assets",
   entryNames: "[name]-[hash]",
+  assetNames: "[name]-[hash]",
+  publicPath: "/ui/assets",
   bundle: true,
+  loader: { ".png": "file" },
   minify: true,
   sourcemap: false,
   metafile: true,

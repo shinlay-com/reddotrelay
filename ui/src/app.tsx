@@ -8,6 +8,7 @@ import { StoragePage } from "./storage-page";
 import { UsersPage } from "./users-page";
 import { APIKeysPage } from "./api-keys-page";
 import { deriveEngineStatus } from "./dashboard-status";
+import logoWordmark from "./assets/reddotrelay-wordmark.png";
 import "./styles.css";
 
 type ServiceState = "checking" | "ok" | "unavailable";
@@ -237,7 +238,7 @@ function App() {
 }
 
 function Brand() {
-  return <header class="brand"><div class="mark" aria-hidden="true">RDR</div><div><p class="eyebrow">Operations console</p><h1 id="title">RedDotRelay</h1></div></header>;
+  return <header class="brand"><div class="brand__logo-surface"><img class="brand__logo" src={logoWordmark} alt="RedDotRelay" /></div><div><p class="eyebrow">Operations console</p><h1 id="title" class="visually-hidden">RedDotRelay</h1></div></header>;
 }
 
 function StatusPill({ label, state }: { label: string; state: ServiceState }) {
@@ -283,7 +284,7 @@ function Dashboard({ session, data, error, refreshing, onRefresh, onLogout, busy
       <header class="application-topbar">
         <div class="application-brand-group">
           <button class="navigation-toggle" type="button" aria-label={navigationCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!navigationCollapsed} title={navigationCollapsed ? "Expand sidebar" : "Collapse sidebar"} onClick={() => setNavigationCollapsed(!navigationCollapsed)}>≡</button>
-          <a class="application-brand" href="#overview" onClick={(event) => { event.preventDefault(); selectSection("overview"); }}><span>R</span><strong>RedDotRelay</strong></a>
+          <a class="application-brand" href="#overview" aria-label="RedDotRelay overview" onClick={(event) => { event.preventDefault(); selectSection("overview"); }}><img src={logoWordmark} alt="RedDotRelay" /></a>
         </div>
         <div class="engine-identity"><span class="engine-identity__dot" /><span><small>Connected environment</small>{buildInfo?.environmentName ?? "Local Engine"}</span></div>
         {buildInfo&&<span class="engine-version" tabindex={0} title={`Version ${buildInfo.version}\nCommit ${buildInfo.commit}\nBuilt ${buildInfo.buildDate}`}>{buildInfo.version}</span>}
@@ -293,7 +294,7 @@ function Dashboard({ session, data, error, refreshing, onRefresh, onLogout, busy
       <aside class="application-sidebar">
         <nav aria-label="Main navigation">{navigation.map((item) => <a key={item.id} href={`#${item.id}`} class={`application-nav-item${activeSection === item.id ? " active" : ""}`} aria-current={activeSection === item.id ? "page" : undefined} title={navigationCollapsed ? item.label : undefined} onClick={(event) => { event.preventDefault(); selectSection(item.id); }}><span aria-hidden="true">{item.icon}</span><strong>{item.label}</strong>{item.count !== undefined && <b>{item.count}</b>}</a>)}</nav>
         <details class={`application-engine-status engine-status--${status.toLowerCase()}`}>
-          <summary title="Show Engine status details"><span class="engine-identity__dot" /><div><strong>Engine status: {status}</strong><small>{data ? `Checked ${formatTime(data.lastCheckedAt)}` : "Waiting for dashboard data"}</small></div></summary>
+          <summary title="Show Engine status details"><span class="engine-identity__dot" /><div><strong>Status: {status}</strong><small>{data ? `Checked ${formatTime(data.lastCheckedAt)}` : "Waiting for dashboard data"}</small></div></summary>
           {data && <div class="engine-status-detail">
             <dl>
               <div><dt>Service</dt><dd>{data.health === "ok" ? "Healthy" : "Unavailable"}</dd></div>
