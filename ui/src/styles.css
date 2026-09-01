@@ -815,6 +815,27 @@ pre,
 .scanner-progress--synced { border-left: 3px solid #12b76a !important; }
 .scanner-progress--lagging, .scanner-progress--paused { border-left: 3px solid #f79009 !important; }
 .scanner-progress--failed { border-left: 3px solid #f04438 !important; }
+.application-frame .scanner-progress__card.selected {
+  position: relative;
+  border-color: #075fce !important;
+  background: #edf6ff !important;
+  box-shadow: 0 0 0 2px rgba(7,95,206,.18) !important;
+}
+.application-frame .scanner-progress__card.selected::after {
+  content: "Filtering";
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: #075fce;
+  background: #d7ebff;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.application-frame .scanner-progress__card.selected > div > span:not(.progress-status) { color: #344054; }
 .diagnostic-filters { margin-top: 14px; }
 .history-event__summary { min-height: 64px; }
 .pagination { padding-top: 4px; }

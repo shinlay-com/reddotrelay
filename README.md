@@ -4,6 +4,20 @@ RedDotRelay is a secure, self-hosted EVM event-to-webhook relay. It scans confir
 
 RedDotRelay is open source under [AGPL-3.0-only](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md), [security policy](SECURITY.md), and [support](SUPPORT.md).
 
+## High Level Architecture
+
+```mermaid
+flowchart LR
+    rpc[EVM RPC endpoint] --> scanner[Scanner\nconfirmed eth_getLogs]
+    scanner --> decoder[ABI decoder]
+    decoder --> store[(SQLite\nevents, checkpoints, outbox)]
+    store --> delivery[Durable delivery worker]
+    delivery --> webhook[Webhook receiver]
+    ui[Embedded management UI\nand REST API] --> store
+```
+
+## Interface
+
 ### Engine overview
 
 ![RedDotRelay Engine overview](assets/screenshots/overview.png)
@@ -77,13 +91,23 @@ go run ./cmd/reddotrelay -config config.yaml
 - ABI event decoding, deterministic event IDs, and SQLite persistence.
 - At-least-once webhook delivery with retries and dead letters.
 - Embedded management UI and authenticated REST API.
-- RPC authentication: HTTP Basic, static Bearer, API key, or provider JWT.
+- Flexible upstream RPC authentication: HTTP Basic, static Bearer tokens,
+  custom headers (including API keys), Ethereum Engine JWT, and provider JWT
+  token endpoints.
+- Credential values are encrypted locally with the Engine operator key and are
+  write-only: they are never returned by the UI, API, exports, audits, metrics,
+  or logs.
 
 YAML contains static process settings. Listener, contract, webhook, user, API key, retention, and audit configuration is managed through the authenticated UI or API and stored in SQLite. Keep credential-bearing values in environment or file references; never commit secrets.
 
 ## API and operations
 
 The service listens on port 8080. `/healthz`, `/readyz`, and `/metrics` expose health and telemetry. Management routes under `/api/v1/` require a UI session or API key.
+
+Developers can use the [OpenAPI specification](api/openapi.yaml) as the
+authoritative reference for endpoints, request payloads, response schemas, and
+status codes. It also documents authentication requirements and ETag-based
+configuration mutations.
 
 Create an admin API key locally:
 
@@ -98,3 +122,14 @@ Send it as `Authorization: Bearer <secret>`. Secrets are shown only once and sto
 Modified network versions must provide corresponding source as required by the AGPL. Dependency licenses are included under `LICENSES/`.
 
 Report security issues privately using [SECURITY.md](SECURITY.md). Use the repository GitHub issue tracker for bugs, questions, and feature requests.
+
+## Development approach
+
+RedDotRelay uses an AI-assisted engineering workflow. AI coding agents may assist
+with implementation, testing, documentation, code review, and iterative
+improvement.
+
+AI-generated changes are treated as engineering contributions, not trusted
+output: they are reviewed, tested, and validated before release. Project
+maintainers remain responsible for architecture, security decisions, and the
+released software.
