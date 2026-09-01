@@ -51,17 +51,11 @@ func (handler uiFileHandler) ServeHTTP(writer http.ResponseWriter, request *http
 	} else {
 		writer.Header().Set("Cache-Control", "no-store")
 	}
-	resolved, err := filepath.EvalSymlinks(candidate)
-	if err != nil {
+	if hasSymlinkInPath(handler.directory, candidate) {
 		http.NotFound(writer, request)
 		return
 	}
-	resolved, err = filepath.Abs(resolved)
-	if err != nil || !withinDirectory(handler.directory, resolved) {
-		http.NotFound(writer, request)
-		return
-	}
-	file, err := os.Open(resolved)
+	file, err := os.Open(candidate)
 	if err != nil {
 		http.NotFound(writer, request)
 		return
@@ -73,11 +67,30 @@ func (handler uiFileHandler) ServeHTTP(writer http.ResponseWriter, request *http
 		return
 	}
 	serveRequest := request.Clone(request.Context())
-	serveRequest.URL.Path = "/" + filepath.Base(resolved)
-	http.ServeContent(writer, serveRequest, filepath.Base(resolved), info.ModTime(), file)
+	serveRequest.URL.Path = "/" + filepath.Base(candidate)
+	http.ServeContent(writer, serveRequest, filepath.Base(candidate), info.ModTime(), file)
 }
 
 func withinDirectory(directory, candidate string) bool {
 	relative, err := filepath.Rel(directory, candidate)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func hasSymlinkInPath(directory, candidate string) bool {
+	relative, err := filepath.Rel(directory, candidate)
+	if err != nil {
+		return true
+	}
+	current := directory
+	for _, segment := range strings.Split(relative, string(filepath.Separator)) {
+		if segment == "." || segment == "" {
+			continue
+		}
+		current = filepath.Join(current, segment)
+		info, err := os.Lstat(current)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
 }

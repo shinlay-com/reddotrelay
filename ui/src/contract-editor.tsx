@@ -59,7 +59,7 @@ function ContractEditor({ session, revision, listenerID, contract, onCancel, onC
       const body = contract
         ? { address: address.trim(), abi: parsed.abi, eventSelectors: selected }
         : { address: address.trim(), abi: parsed.abi, events: selected.map((selector) => ({ selector, webhooks: [] })), webhooks: [] };
-      await mutate(session, revision, path, contract ? "PATCH" : "POST", body); onChanged();
+      await mutate(session, revision, path, contract ? "PATCH" : "POST", body); onCancel(); onChanged();
     } catch (caught) { setError(caught instanceof Error ? caught.message : "Contract could not be saved."); } finally { setBusy(false); }
   }
   function toggle(selector: string, checked: boolean) { setSelected(checked ? [...selected, selector] : selected.filter((item) => item !== selector)); }

@@ -249,6 +249,7 @@ function Dashboard({ session, data, error, refreshing, onRefresh, onLogout, busy
   session: Session; data: DashboardData | null; error: string; refreshing: boolean; onRefresh: () => void; onLogout: () => void; busy: boolean;
 }) {
   const [navigationCollapsed, setNavigationCollapsed] = useState(false);
+  const [navigationFlyout, setNavigationFlyout] = useState(false);
   const [activeSection, setActiveSection] = useState("overview");
   const [buildInfo, setBuildInfo] = useState<{version:string;commit:string;buildDate:string;environmentName?:string}>();
   useEffect(()=>{void fetch('/api/v1/build-info',{headers:{Accept:'application/json'}}).then(async response=>{if(response.ok)setBuildInfo(await response.json())}).catch(()=>undefined)},[]);
@@ -268,6 +269,7 @@ function Dashboard({ session, data, error, refreshing, onRefresh, onLogout, busy
   ];
   function selectSection(id: string) {
     setActiveSection(id);
+    setNavigationFlyout(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -279,11 +281,12 @@ function Dashboard({ session, data, error, refreshing, onRefresh, onLogout, busy
     return () => window.clearInterval(interval);
   }, [activeSection, onRefresh]);
   const status = !data ? "Unavailable" : deriveEngineStatus({ healthOK: data.health === "ok", readinessOK: data.readiness === "ok", pendingDeliveries: data.deliveryCounts.pending, deadDeliveries: data.deliveryCounts.dead, scannerFailure: data.recent.scannerErrors > 0 || data.progress.some((item) => Boolean(item.lastError)), runtimeFailure: data.recent.deliveryFailures > 0 || data.runtime.rpcListeners.some((item) => item.state === "failed") });
+  const compactNavigation = window.matchMedia("(max-width: 1100px)").matches;
   return (
     <div class={`application-frame${navigationCollapsed ? " navigation-collapsed" : ""}`}>
       <header class="application-topbar">
         <div class="application-brand-group">
-          <button class="navigation-toggle" type="button" aria-label={navigationCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!navigationCollapsed} title={navigationCollapsed ? "Expand sidebar" : "Collapse sidebar"} onClick={() => setNavigationCollapsed(!navigationCollapsed)}>≡</button>
+          <button class="navigation-toggle" type="button" aria-label={compactNavigation ? (navigationFlyout ? "Close navigation menu" : "Open navigation menu") : navigationCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={compactNavigation ? navigationFlyout : !navigationCollapsed} title={compactNavigation ? (navigationFlyout ? "Close menu" : "Open menu") : navigationCollapsed ? "Expand sidebar" : "Collapse sidebar"} onClick={() => compactNavigation ? setNavigationFlyout(!navigationFlyout) : setNavigationCollapsed(!navigationCollapsed)}>≡</button>
           <a class="application-brand" href="#overview" aria-label="RedDotRelay overview" onClick={(event) => { event.preventDefault(); selectSection("overview"); }}><img src={logoWordmark} alt="RedDotRelay" /></a>
         </div>
         <div class="engine-identity"><span class="engine-identity__dot" /><span><small>Connected environment</small>{buildInfo?.environmentName ?? "Local Engine"}</span></div>
@@ -291,7 +294,7 @@ function Dashboard({ session, data, error, refreshing, onRefresh, onLogout, busy
         <div class="application-breadcrumb"><span>›</span>{navigation.find((item) => item.id === activeSection)?.label ?? "Overview"}</div>
         <div class="account"><div><span class="muted">Signed in as</span><strong>{session.name}</strong><span class="role">{session.role}</span></div><button class="button button--secondary" disabled={busy} onClick={onLogout}>Sign out</button></div>
       </header>
-      <aside class="application-sidebar">
+      <aside class={`application-sidebar${navigationFlyout ? " navigation-flyout" : ""}`}>
         <nav aria-label="Main navigation">{navigation.map((item) => <a key={item.id} href={`#${item.id}`} class={`application-nav-item${activeSection === item.id ? " active" : ""}`} aria-current={activeSection === item.id ? "page" : undefined} title={navigationCollapsed ? item.label : undefined} onClick={(event) => { event.preventDefault(); selectSection(item.id); }}><span aria-hidden="true">{item.icon}</span><strong>{item.label}</strong>{item.count !== undefined && <b>{item.count}</b>}</a>)}</nav>
         <details class={`application-engine-status engine-status--${status.toLowerCase()}`}>
           <summary title="Show Engine status details"><span class="engine-identity__dot" /><div><strong>Status: {status}</strong><small>{data ? `Checked ${formatTime(data.lastCheckedAt)}` : "Waiting for dashboard data"}</small></div></summary>
@@ -307,6 +310,7 @@ function Dashboard({ session, data, error, refreshing, onRefresh, onLogout, busy
           </div>}
         </details>
       </aside>
+      {navigationFlyout && <button class="navigation-scrim" type="button" aria-label="Close navigation menu" onClick={() => setNavigationFlyout(false)} />}
       <main class="console">
       {error && <p class="alert" role="alert">{error}</p>}
       {configurationView && !data ? <section class="panel loading" role="status">{refreshing ? "Loading view…" : "View data is unavailable."}</section> : activeSection === "overview" && data ? <Overview data={data} sessionName={session.name} onRefresh={onRefresh} refreshing={refreshing} /> : activeSection === "listeners" && data ? <ListenersPage session={session} snapshot={data.snapshot} runtimeListeners={runtimeListeners} onChanged={onRefresh} /> : activeSection === "deliveries" ? <DeliveryOperations session={session} listeners={listeners} runtimeListeners={runtimeListeners} /> : activeSection === "activity" ? <ActivityPanel session={session} /> : activeSection === "storage" ? <StoragePage session={session}/> : activeSection === "users" ? <UsersPage session={session}/> : activeSection === "api-keys" ? <APIKeysPage session={session}/> : null}

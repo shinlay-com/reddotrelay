@@ -29,7 +29,9 @@ function WebhookEditor({ session, revision, basePath, webhook, onCancel, onChang
     setBusy(true); setError(""); setResult("");
     try {
       const body = { ...locatorBody(), authentication: authentication() };
-      await mutate(session, revision, webhook ? `${basePath}/${webhook.id}` : basePath, webhook ? "PATCH" : "POST", body); onChanged();
+      await mutate(session, revision, webhook ? `${basePath}/${webhook.id}` : basePath, webhook ? "PATCH" : "POST", body);
+      if (!webhook) onCancel();
+      onChanged();
     } catch (caught) { setError(caught instanceof Error ? caught.message : "Webhook could not be saved."); } finally { setBusy(false); }
   }
   return <form class="editor webhook-editor" onSubmit={(event) => void submit(event)}>
