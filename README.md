@@ -4,6 +4,18 @@ RedDotRelay is a secure, self-hosted EVM event-to-webhook relay. It scans confir
 
 RedDotRelay is open source under [AGPL-3.0-only](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md), [security policy](SECURITY.md), and [support](SUPPORT.md).
 
+### Engine overview
+
+![RedDotRelay Engine overview](assets/screenshots/overview.png)
+
+### Events and deliveries
+
+![RedDotRelay events and deliveries](assets/screenshots/events-and-deliveries.png)
+
+### RPC listeners
+
+![RedDotRelay RPC listener management](assets/screenshots/rpc-listeners.png)
+
 ## Quick start
 
 ```sh
@@ -25,6 +37,30 @@ docker run --rm --name reddotrelay `
 
 Check <http://127.0.0.1:8080/healthz>, then open
 <http://127.0.0.1:8080/ui/> to create the initial administrator.
+
+### Completely reset all data
+
+> **Warning:** This permanently deletes every RedDotRelay user, RPC listener,
+> contract, event, delivery, audit record, and setting stored in SQLite.
+
+For the published Docker image quick start, remove the container and its named
+data volume, then create a fresh volume:
+
+```powershell
+docker rm -f reddotrelay
+docker volume rm reddotrelay-data
+docker volume create reddotrelay-data
+```
+
+Start the image again using the `docker run` command above, then open the UI to
+create a new initial administrator.
+
+For a Docker Compose installation:
+
+```powershell
+docker compose down -v
+docker compose up --build -d
+```
 
 For a local source build, install Go 1.25+ and Node.js 24+, then run:
 
