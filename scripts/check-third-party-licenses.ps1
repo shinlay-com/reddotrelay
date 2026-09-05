@@ -23,7 +23,7 @@ try {
     $actualModules = foreach ($target in $releaseTargets) {
         $env:GOOS = $target.GOOS
         $env:GOARCH = $target.GOARCH
-        $targetModules = & go list -deps -f '{{with .Module}}{{if ne .Path "reddotrelay"}}{{.Path}}|{{.Version}}{{end}}{{end}}' ./cmd/reddotrelay
+        $targetModules = & go list -deps -f '{{with .Module}}{{if ne .Path \"reddotrelay\"}}{{.Path}}|{{.Version}}{{end}}{{end}}' ./cmd/reddotrelay
         if ($LASTEXITCODE -ne 0) {
             throw "Unable to enumerate modules compiled into RedDotRelay for $($target.GOOS)/$($target.GOARCH)."
         }
@@ -61,14 +61,14 @@ foreach ($entry in $goManifest) {
     }
 }
 
-$packageLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'ui\package-lock.json') -Raw | ConvertFrom-Json -AsHashtable
 $npmManifest = Import-Csv -LiteralPath $npmManifestPath
 foreach ($entry in $npmManifest) {
     $lockKey = "node_modules/$($entry.Package)"
-    $lockedPackage = $packageLock.packages[$lockKey]
-    if ($null -eq $lockedPackage) {
+    $packageJsonStr = & node -e "const pkg = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).packages[process.argv[2]]; if (pkg) console.log(JSON.stringify(pkg));" (Join-Path $repositoryRoot 'ui\package-lock.json') $lockKey
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($packageJsonStr)) {
         throw "Runtime UI dependency is absent from package-lock.json: $($entry.Package)"
     }
+    $lockedPackage = ConvertFrom-Json $packageJsonStr
     if ($lockedPackage.version -ne $entry.Version) {
         throw "Runtime UI dependency version differs for $($entry.Package): expected $($entry.Version), found $($lockedPackage.version)"
     }

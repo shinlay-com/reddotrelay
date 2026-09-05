@@ -549,3 +549,28 @@ WHERE chain_id = ? AND transaction_hash = ? AND log_index = ? AND destination = 
 		t.Fatalf("delivery state = (%s, %d, %q, delivered=%v)", status, attempts, lastError, deliveredAt != nil)
 	}
 }
+
+func TestInitializeWithRetry(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "retry_test.db")
+	store := openStore(t, path)
+	defer store.Close()
+
+	if err := store.initializeWithRetry(ctx); err != nil {
+		t.Fatalf("initializeWithRetry failed on existing database: %v", err)
+	}
+
+	var foreignKeys, synchronous int
+	if err := store.db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeys != 1 {
+		t.Fatalf("PRAGMA foreign_keys = %d, want 1", foreignKeys)
+	}
+	if err := store.db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&synchronous); err != nil {
+		t.Fatal(err)
+	}
+	if synchronous != 2 { // 2 == FULL
+		t.Fatalf("PRAGMA synchronous = %d, want 2 (FULL)", synchronous)
+	}
+}
