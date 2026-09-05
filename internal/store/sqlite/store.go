@@ -107,8 +107,6 @@ func (s *Store) DeliveryStatusCounts(ctx context.Context) (pending, delivered, d
 func (s *Store) initialize(ctx context.Context) error {
 	const schema = `
 PRAGMA foreign_keys = ON;
--- Rollback journaling is compatible with local disks and network-backed Azure Files.
-PRAGMA journal_mode = DELETE;
 PRAGMA synchronous = FULL;
 PRAGMA busy_timeout = 5000;
 
