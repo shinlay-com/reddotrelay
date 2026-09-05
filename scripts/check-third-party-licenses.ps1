@@ -23,14 +23,14 @@ try {
     $actualModules = foreach ($target in $releaseTargets) {
         $env:GOOS = $target.GOOS
         $env:GOARCH = $target.GOARCH
-        $targetModules = & go list -deps -f '{{with .Module}}{{if ne .Path \"reddotrelay\"}}{{.Path}}|{{.Version}}{{end}}{{end}}' ./cmd/reddotrelay
+        $targetModules = & go list -deps -f '{{with .Module}}{{.Path}}|{{.Version}}{{end}}' ./cmd/reddotrelay
         if ($LASTEXITCODE -ne 0) {
             throw "Unable to enumerate modules compiled into RedDotRelay for $($target.GOOS)/$($target.GOARCH)."
         }
         $targetModules
     }
     $actualModules = $actualModules |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not $_.StartsWith('reddotrelay|') } |
         Sort-Object -Unique
 } finally {
     $env:GOOS = $originalGOOS
