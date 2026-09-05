@@ -182,6 +182,19 @@ func TestManagementAPIPersistsAndReturnsSecretReferences(t *testing.T) {
 	}
 }
 
+func TestManagementAPIExplainsMissingRPCEncryptionKey(t *testing.T) {
+	store, secret := emptyManagementFixture(t, core.APIKeyAdmin)
+	body := validListenerCreateBody()
+	body["rpcAuthentication"] = map[string]any{
+		"type": "provider-jwt", "tokenUrl": "https://provider.example/token",
+		"tokenApiKey": "api-key", "secret": "signature",
+	}
+	response := postManagement(t, healthHandler(store), secret, "/api/v1/rpc-listeners", `"revision-0"`, body)
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "rpc_credentials_key_ref") {
+		t.Fatalf("create credentialed listener = %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestManagementAPIRejectsAmbiguousSecretReferences(t *testing.T) {
 	store, secret := emptyManagementFixture(t, core.APIKeyAdmin)
 	body := validListenerCreateBody()

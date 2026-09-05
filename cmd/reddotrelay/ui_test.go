@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"reddotrelay/internal/core"
 )
 
 func TestUIFileHandlerServesIndexAssetsAndFallback(t *testing.T) {
@@ -43,6 +45,22 @@ func TestUIFileHandlerServesIndexAssetsAndFallback(t *testing.T) {
 	handler.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/ui/assets/missing.js", nil))
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing asset = %d", missing.Code)
+	}
+}
+
+func TestRootRedirectsToManagementUI(t *testing.T) {
+	store, _ := emptyManagementFixture(t, core.APIKeyAdmin)
+	handler := healthHandlerWithRuntimeOperations(store, nil, nil, t.TempDir(), newUISessionManager(store, false), newOperationalEventBuffer(10), nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusMovedPermanently || response.Header().Get("Location") != "/ui/" {
+		t.Fatalf("root response = %d location %q", response.Code, response.Header().Get("Location"))
+	}
+
+	mutation := httptest.NewRecorder()
+	handler.ServeHTTP(mutation, httptest.NewRequest(http.MethodPost, "/", nil))
+	if mutation.Code != http.StatusMethodNotAllowed || mutation.Header().Get("Allow") != "GET, HEAD" {
+		t.Fatalf("root mutation = %d allow %q", mutation.Code, mutation.Header().Get("Allow"))
 	}
 }
 

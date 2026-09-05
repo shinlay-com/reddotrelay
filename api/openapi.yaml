@@ -210,6 +210,66 @@ paths:
       parameters: [{$ref: '#/components/parameters/IfMatch'}]
       requestBody: {$ref: '#/components/requestBodies/WebhookCreate'}
       responses: {'201': {description: Webhook created}, default: {$ref: '#/components/responses/BadRequest'}}
+  /api/v1/rpc-listeners/{rpcListenerId}/skip-to-head/preview:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}]
+    post:
+      tags: [Operations]
+      operationId: previewScannerSkip
+      description: Admin only. Requires a paused, fully stopped listener. Verifies its own RPC confirmed head. Returns an actor-bound preview valid for five minutes and invalidated by restart or configuration changes. Does not mutate state.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false}}}}
+      responses:
+        '200': {description: Verified skip preview, content: {application/json: {schema: {$ref: '#/components/schemas/ScannerSkipPreview'}}}}
+        '409': {description: Listener not stopped or no eligible blocks}
+        '412': {description: Stale configuration revision}
+        '502': {description: RPC head could not be verified; nothing changed}
+        default: {$ref: '#/components/responses/BadRequest'}
+  /api/v1/rpc-listeners/{rpcListenerId}/skip-to-head:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}]
+    post:
+      tags: [Operations]
+      operationId: confirmScannerSkip
+      description: Admin only. Revalidates the exact previewed canonical block. Atomically advances the checkpoint, saves its canonical anchor and audit, and enables scanning from the following block. Active backfills prevent skipping. Existing events and deliveries remain unchanged. Missing skipped events require later backfill. Reorg recovery can still fall back to startBlock.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token, confirmation]
+              properties:
+                token: {type: string, maxLength: 7000}
+                confirmation: {type: string, pattern: '^SKIP [0-9]+$', maxLength: 32}
+      responses:
+        '200': {description: Durable skip and resume, content: {application/json: {schema: {$ref: '#/components/schemas/ScannerSkipAudit'}}}}
+        '409': {description: Stale preview, changed chain, active backfill, or listener not stopped}
+        '412': {description: Stale configuration revision}
+        '422': {description: Exact typed confirmation required}
+        '502': {description: RPC target could not be reverified; nothing changed}
+        default: {$ref: '#/components/responses/BadRequest'}
+  /api/v1/rpc-listeners/{rpcListenerId}/skip-audit:
+    parameters: [{$ref: '#/components/parameters/RPCListenerID'}]
+    get:
+      tags: [Operations]
+      operationId: listScannerSkipAudit
+      description: Admin-only immutable audit, newest first. Remains available after listener deletion.
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200}}
+        - {name: before, in: query, schema: {type: integer, minimum: 0, maximum: 9223372036854775807}}
+      responses:
+        '200':
+          description: Bounded audit page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/ScannerSkipAudit'}}
+                  nextBefore: {type: integer}
+        default: {$ref: '#/components/responses/BadRequest'}
   /api/v1/rpc-listeners/{rpcListenerId}/pause:
     parameters: [{$ref: '#/components/parameters/RPCListenerID'}]
     post:
@@ -476,6 +536,51 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/backfills/preview:
+    post:
+      tags: [Operations]
+      operationId: previewBackfill
+      description: Admin-only preview using the current immutable configuration revision. No work is created.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/BackfillRequest'}}}}
+      responses:
+        '200': {description: Validated preview, content: {application/json: {schema: {$ref: '#/components/schemas/BackfillPreview'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {description: Invalid range or filters}
+  /api/v1/backfills:
+    get:
+      tags: [Operations]
+      operationId: listBackfills
+      parameters: [{name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}, {name: before, in: query, schema: {$ref: '#/components/schemas/UUID'}}]
+      responses:
+        '200': {description: Bounded job page, content: {application/json: {schema: {$ref: '#/components/schemas/BackfillPage'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Operations]
+      operationId: createBackfill
+      description: Requires confirm=true after an administrator reviews preview.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/BackfillRequest'}}}}
+      responses:
+        '201': {description: Durable queued job, content: {application/json: {schema: {$ref: '#/components/schemas/BackfillJob'}}}}
+        '409': {description: Listener already has an active job}
+        '422': {description: Confirmation, range, or filters invalid}
+  /api/v1/backfills/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}]
+    get:
+      tags: [Operations]
+      operationId: getBackfill
+      responses: {'200': {description: Job status, content: {application/json: {schema: {$ref: '#/components/schemas/BackfillJob'}}}}, '404': {$ref: '#/components/responses/NotFound'}}
+  /api/v1/backfills/{id}/pause:
+    post: {tags: [Operations], operationId: pauseBackfill, parameters: [{name: id, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}], responses: {'200': {description: Paused job, content: {application/json: {schema: {$ref: '#/components/schemas/BackfillJob'}}}}, '409': {description: Invalid state transition}}}
+  /api/v1/backfills/{id}/resume:
+    post: {tags: [Operations], operationId: resumeBackfill, parameters: [{name: id, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}], responses: {'200': {description: Queued job, content: {application/json: {schema: {$ref: '#/components/schemas/BackfillJob'}}}}, '409': {description: Invalid state transition}}}
+  /api/v1/backfills/{id}/cancel:
+    post: {tags: [Operations], operationId: cancelBackfill, parameters: [{name: id, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}], responses: {'200': {description: Cancelled job, content: {application/json: {schema: {$ref: '#/components/schemas/BackfillJob'}}}}, '409': {description: Invalid state transition}}}
+  /api/v1/backfill-audit:
+    get:
+      tags: [Operations]
+      operationId: listBackfillAudit
+      parameters: [{name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}, {name: before, in: query, schema: {type: integer, format: uint64}}]
+      responses: {'200': {description: Bounded actor-attributed audit page, content: {application/json: {schema: {$ref: '#/components/schemas/AuditPage'}}}}, '403': {$ref: '#/components/responses/Forbidden'}}
 components:
   securitySchemes:
     bearerAuth: {type: http, scheme: bearer, bearerFormat: api_key}
@@ -546,6 +651,40 @@ components:
       '422': {$ref: '#/components/responses/Unprocessable'}
       '428': {$ref: '#/components/responses/PreconditionRequired'}
   schemas:
+    ScannerSkipPreview:
+      type: object
+      required: [token, rpcListenerId, chainId, configurationRevision, previousBlock, fromBlock, toBlock, blocks, blockHash, expiresAt, confirmation]
+      properties:
+        token: {type: string}
+        rpcListenerId: {type: string, format: uuid}
+        chainId: {type: integer}
+        configurationRevision: {type: integer}
+        previousBlock: {type: integer, nullable: true}
+        fromBlock: {type: integer}
+        toBlock: {type: integer}
+        blocks: {type: integer}
+        blockHash: {type: string}
+        expiresAt: {type: string, format: date-time}
+        confirmation: {type: string}
+    ScannerSkipAudit:
+      type: object
+      required: [sequence, id, rpcListenerId, chainId, actorId, actorName, actorRole, previousBlock, previousHash, fromBlock, toBlock, blockHash, parentHash, configurationRevision, createdAt]
+      properties:
+        sequence: {type: integer}
+        id: {type: string, format: uuid}
+        rpcListenerId: {type: string, format: uuid}
+        chainId: {type: integer}
+        actorId: {type: string}
+        actorName: {type: string}
+        actorRole: {type: string, enum: [admin]}
+        previousBlock: {type: integer, nullable: true}
+        previousHash: {type: string}
+        fromBlock: {type: integer}
+        toBlock: {type: integer}
+        blockHash: {type: string}
+        parentHash: {type: string}
+        configurationRevision: {type: integer}
+        createdAt: {type: string, format: date-time}
     RPCConnectionTest:
       type: object
       additionalProperties: false
@@ -737,6 +876,10 @@ components:
     WebhookMutationResponse: {type: object, required: [revision, webhook], properties: {revision: {type: integer, format: uint64}, webhook: {$ref: '#/components/schemas/Webhook'}}}
     RuntimeStatus: {type: object, additionalProperties: true, required: [desiredRevision, initialReconcileComplete, ready, rpcListeners], properties: {desiredRevision: {type: integer, format: uint64}, initialReconcileComplete: {type: boolean}, lastReconciledAt: {type: string, format: date-time}, ready: {type: boolean}, rpcListeners: {type: array, items: {type: object, additionalProperties: true}}}}
     AuditPage: {type: object, additionalProperties: true, required: [entries], properties: {entries: {type: array, items: {type: object, additionalProperties: true}}, nextBefore: {type: integer}}}
+    BackfillRequest: {type: object, additionalProperties: false, required: [rpcListenerId, fromBlock, toBlock, mode], properties: {rpcListenerId: {$ref: '#/components/schemas/UUID'}, fromBlock: {type: integer, format: uint64}, toBlock: {type: integer, format: uint64}, mode: {const: backfill-missing}, contractIds: {type: array, maxItems: 1000, items: {$ref: '#/components/schemas/UUID'}}, eventIds: {type: array, maxItems: 1000, items: {$ref: '#/components/schemas/UUID'}}, confirm: {type: boolean}}}
+    BackfillPreview: {type: object, additionalProperties: false, required: [rpcListenerId, chainId, fromBlock, toBlock, blocks, mode, contractIds, eventIds, configurationRevision, destinations], properties: {rpcListenerId: {$ref: '#/components/schemas/UUID'}, chainId: {type: integer, format: uint64}, fromBlock: {type: integer, format: uint64}, toBlock: {type: integer, format: uint64}, blocks: {type: integer, format: uint64}, mode: {const: backfill-missing}, contractIds: {type: array, items: {$ref: '#/components/schemas/UUID'}}, eventIds: {type: array, items: {$ref: '#/components/schemas/UUID'}}, configurationRevision: {type: integer, format: uint64}, destinations: {type: array, items: {type: string, description: Secret reference or direct configured destination}}}}
+    BackfillJob: {type: object, additionalProperties: false, required: [id, rpcListenerId, chainId, mode, fromBlock, toBlock, nextBlock, contractIds, eventIds, configurationRevision, destinations, state, processedBlocks, discoveredEvents, createdEvents, createdDeliveries, duplicates, createdAt, updatedAt], properties: {id: {$ref: '#/components/schemas/UUID'}, rpcListenerId: {$ref: '#/components/schemas/UUID'}, chainId: {type: integer, format: uint64}, mode: {const: backfill-missing}, fromBlock: {type: integer, format: uint64}, toBlock: {type: integer, format: uint64}, nextBlock: {type: integer, format: uint64}, contractIds: {type: array, items: {$ref: '#/components/schemas/UUID'}}, eventIds: {type: array, items: {$ref: '#/components/schemas/UUID'}}, configurationRevision: {type: integer, format: uint64}, destinations: {type: array, items: {type: string}}, state: {type: string, enum: [queued, running, paused, completed, failed, cancelled]}, processedBlocks: {type: integer, format: uint64}, discoveredEvents: {type: integer, format: uint64}, createdEvents: {type: integer, format: uint64}, createdDeliveries: {type: integer, format: uint64}, duplicates: {type: integer, format: uint64}, failureSummary: {type: string, maxLength: 240}, createdAt: {type: string, format: date-time}, updatedAt: {type: string, format: date-time}, startedAt: {type: string, format: date-time}, completedAt: {type: string, format: date-time}}}
+    BackfillPage: {type: object, additionalProperties: false, required: [entries], properties: {entries: {type: array, items: {$ref: '#/components/schemas/BackfillJob'}}, nextBefore: {$ref: '#/components/schemas/UUID'}}}
     OperationalEvent:
       type: object
       additionalProperties: false
@@ -756,7 +899,7 @@ components:
     DeliveryPage: {type: object, additionalProperties: false, required: [entries], properties: {entries: {type: array, items: {$ref: '#/components/schemas/DeliveryDiagnostic'}}, nextAfter: {$ref: '#/components/schemas/UUID'}}}
     RequeueResponse: {type: object, additionalProperties: false, required: [deliveryId, eventId, status, auditId], properties: {deliveryId: {$ref: '#/components/schemas/UUID'}, eventId: {$ref: '#/components/schemas/UUID'}, status: {const: pending}, auditId: {$ref: '#/components/schemas/UUID'}}}
     DeliveryRequeueAuditPage: {type: object, additionalProperties: false, required: [entries], properties: {entries: {type: array, items: {type: object, additionalProperties: false, required: [id, actorId, actorName, actorRole, deliveryId, eventId, previousAttempts, createdAt], properties: {id: {$ref: '#/components/schemas/UUID'}, actorId: {$ref: '#/components/schemas/UUID'}, actorName: {type: string}, actorRole: {const: admin}, deliveryId: {$ref: '#/components/schemas/UUID'}, eventId: {$ref: '#/components/schemas/UUID'}, previousAttempts: {type: integer, minimum: 0}, createdAt: {type: string, format: date-time}}}}, nextBefore: {type: integer, format: uint64}}}
-    ScannerProgressResponse: {type: object, additionalProperties: false, required: [rpcListeners], properties: {rpcListeners: {type: array, items: {type: object, additionalProperties: false, required: [rpcListenerId, chainId, latestBlock, confirmedHead, checkpoint, lagBlocks, updatedAt], properties: {rpcListenerId: {$ref: '#/components/schemas/UUID'}, chainId: {type: integer, format: uint64}, latestBlock: {type: integer, format: uint64}, confirmedHead: {type: integer, format: uint64}, checkpoint: {type: integer, format: uint64}, lagBlocks: {type: integer, format: uint64}, updatedAt: {type: string, format: date-time}, lastError: {type: string}, lastErrorAt: {type: string, format: date-time}}}}}}
+    ScannerProgressResponse: {type: object, additionalProperties: false, required: [rpcListeners], properties: {rpcListeners: {type: array, items: {type: object, additionalProperties: false, required: [rpcListenerId, chainId, latestBlock, confirmedHead, checkpoint, lagBlocks, updatedAt], properties: {rpcListenerId: {$ref: '#/components/schemas/UUID'}, chainId: {type: integer, format: uint64}, latestBlock: {type: integer, format: uint64}, confirmedHead: {type: integer, format: uint64}, checkpoint: {type: integer, format: uint64}, lagBlocks: {type: integer, format: uint64}, updatedAt: {type: string, format: date-time}, lastFetchMs: {type: integer, format: uint64, description: Duration of the most recent successful eth_getLogs batch only, excluding verification and persistence.}, averageFetchMs: {type: integer, format: uint64, description: Mean successful eth_getLogs batch duration since this runtime started.}, lastError: {type: string}, lastErrorAt: {type: string, format: date-time}}}}}}
     ConfigurationDocument:
       type: object
       additionalProperties: false

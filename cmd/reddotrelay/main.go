@@ -26,12 +26,15 @@ import (
 	"reddotrelay/internal/logging"
 	"reddotrelay/internal/observability"
 	retentionservice "reddotrelay/internal/retention"
+	"reddotrelay/internal/scanner"
 	"reddotrelay/internal/secrets"
 	"reddotrelay/internal/store/sqlite"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	gethrpc "github.com/ethereum/go-ethereum/rpc"
 )
 
 var version = "dev"
@@ -62,6 +65,9 @@ func run(ctx context.Context, args []string) error {
 	}
 	if len(args) > 0 && args[0] == "database" {
 		return runDatabase(ctx, args[1:], os.Stdout)
+	}
+	if len(args) > 0 && args[0] == "backfill" {
+		return runBackfill(ctx, args[1:], os.Stdout)
 	}
 	flags := flag.NewFlagSet("reddotrelay", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -500,6 +506,8 @@ func runService(ctx context.Context, cfg config.Config, logger *slog.Logger, eve
 	metrics := observability.New(store, version)
 	progress := newScannerProgressTracker()
 	operations := newEngineOperations(store, cfg.Retention, logger)
+	verificationLimiter := make(chan struct{}, cfg.VerificationConcurrency)
+	backfills := &backfillWorker{store: store, cfg: cfg.Backfill, logger: logger, metrics: metrics, verificationConcurrency: cfg.VerificationConcurrency, verificationLimiter: verificationLimiter}
 	worker, err := delivery.NewWithObserver(store, delivery.Options{
 		Workers: cfg.Delivery.Workers, BatchSize: cfg.Delivery.BatchSize, HTTPTimeout: cfg.Delivery.HTTPTimeout,
 		LeaseDuration: cfg.Delivery.LeaseDuration, RetryBackoff: cfg.Delivery.RetryBackoff,
@@ -508,7 +516,7 @@ func runService(ctx context.Context, cfg config.Config, logger *slog.Logger, eve
 	if err != nil {
 		return fmt.Errorf("configure delivery: %w", err)
 	}
-	manager, err := newRuntimeManagerWithObserver(store, buildScannerRuntimeWithObservers(store, logger, secretResolver, scannerObserverGroup{metrics, progress}), logger, metrics)
+	manager, err := newRuntimeManagerWithObserver(store, buildScannerRuntimeWithObservers(store, logger, secretResolver, scannerObserverGroup{metrics, progress}, cfg.VerificationConcurrency, verificationLimiter), logger, metrics)
 	if err != nil {
 		return fmt.Errorf("configure scanner runtime manager: %w", err)
 	}
@@ -526,7 +534,7 @@ func runService(ctx context.Context, cfg config.Config, logger *slog.Logger, eve
 		operationalEvents = eventBuffers[0]
 	}
 	server := &http.Server{
-		Handler: healthHandlerWithRuntimeOperations(store, manager, metrics.Handler(), uiDirectory, uiSessions, operationalEvents, progress, operations, cfg.Environment, metrics), ReadHeaderTimeout: 5 * time.Second,
+		Handler: healthHandlerWithRuntimeOperations(store, manager, metrics.Handler(), uiDirectory, uiSessions, operationalEvents, progress, operations, cfg.Environment, cfg.Backfill, metrics), ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	listener, err := net.Listen("tcp", cfg.Server.ListenAddress)
@@ -541,6 +549,13 @@ func runService(ctx context.Context, cfg config.Config, logger *slog.Logger, eve
 		defer group.Done()
 		if err := manager.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("scanner runtime manager stopped", "error", err)
+		}
+	}()
+	group.Add(1)
+	go func() {
+		defer group.Done()
+		if err := backfills.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("backfill worker stopped")
 		}
 	}()
 	group.Add(1)
@@ -579,6 +594,107 @@ func runService(ctx context.Context, cfg config.Config, logger *slog.Logger, eve
 // go-ethereum's local types.Header.Hash calculation.
 type canonicalRPC struct {
 	*ethclient.Client
+}
+
+// HeaderByNumber reads only the canonical fields used by the scanner. Some
+// EVM-compatible providers omit optional go-ethereum header fields, while
+// number and parent hash remain sufficient for the scanner's chain checks.
+func (client *canonicalRPC) HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
+	tag := "latest"
+	if number != nil {
+		tag = hexutil.EncodeBig(number)
+	}
+	var block *struct {
+		Number     *hexutil.Big `json:"number"`
+		ParentHash common.Hash  `json:"parentHash"`
+	}
+	if err := client.Client.Client().CallContext(ctx, &block, "eth_getBlockByNumber", tag, false); err != nil {
+		return nil, err
+	}
+	if block == nil || block.Number == nil {
+		return nil, errors.New("RPC returned an incomplete block header")
+	}
+	if block.Number.ToInt().Sign() != 0 && block.ParentHash == (common.Hash{}) {
+		return nil, errors.New("RPC returned an incomplete block header")
+	}
+	return &types.Header{Number: block.Number.ToInt(), ParentHash: block.ParentHash}, nil
+}
+
+func (client *canonicalRPC) CanonicalHeaderByNumber(ctx context.Context, number *big.Int) (common.Hash, common.Hash, error) {
+	tag := "latest"
+	if number != nil {
+		tag = hexutil.EncodeBig(number)
+	}
+	var block *struct {
+		Number     *hexutil.Big `json:"number"`
+		Hash       common.Hash  `json:"hash"`
+		ParentHash common.Hash  `json:"parentHash"`
+	}
+	if err := client.Client.Client().CallContext(ctx, &block, "eth_getBlockByNumber", tag, false); err != nil {
+		return common.Hash{}, common.Hash{}, err
+	}
+	if block == nil || block.Number == nil || block.Hash == (common.Hash{}) {
+		return common.Hash{}, common.Hash{}, errors.New("RPC returned an incomplete block header")
+	}
+	if block.Number.ToInt().Sign() != 0 && block.ParentHash == (common.Hash{}) {
+		return common.Hash{}, common.Hash{}, errors.New("RPC returned an incomplete block header")
+	}
+	return block.Hash, block.ParentHash, nil
+}
+
+func (client *canonicalRPC) CanonicalHeadersByNumber(ctx context.Context, numbers []*big.Int) ([]scanner.CanonicalBatchHeader, error) {
+	type result struct {
+		Number     *hexutil.Big `json:"number"`
+		Hash       common.Hash  `json:"hash"`
+		ParentHash common.Hash  `json:"parentHash"`
+	}
+	elements := make([]gethrpc.BatchElem, len(numbers))
+	results := make([]result, len(numbers))
+	for i, number := range numbers {
+		tag := "latest"
+		if number != nil {
+			tag = hexutil.EncodeBig(number)
+		}
+		elements[i] = gethrpc.BatchElem{Method: "eth_getBlockByNumber", Args: []any{tag, false}, Result: &results[i]}
+	}
+	if err := client.Client.Client().BatchCallContext(ctx, elements); err != nil {
+		if isUnsupportedBatchError(err) {
+			return client.canonicalHeadersByNumberSequential(ctx, numbers)
+		}
+		return nil, err
+	}
+	headers := make([]scanner.CanonicalBatchHeader, len(results))
+	for i, block := range results {
+		if block.Number == nil || block.Hash == (common.Hash{}) {
+			return nil, errors.New("RPC returned an incomplete block header")
+		}
+		if block.Number.ToInt().Sign() != 0 && block.ParentHash == (common.Hash{}) {
+			return nil, errors.New("RPC returned an incomplete block header")
+		}
+		headers[i] = scanner.CanonicalBatchHeader{Number: block.Number.ToInt().Uint64(), Hash: block.Hash, ParentHash: block.ParentHash}
+	}
+	return headers, nil
+}
+
+func (client *canonicalRPC) canonicalHeadersByNumberSequential(ctx context.Context, numbers []*big.Int) ([]scanner.CanonicalBatchHeader, error) {
+	headers := make([]scanner.CanonicalBatchHeader, len(numbers))
+	for i, number := range numbers {
+		hash, parent, err := client.CanonicalHeaderByNumber(ctx, number)
+		if err != nil {
+			return nil, err
+		}
+		value := uint64(0)
+		if number != nil {
+			value = number.Uint64()
+		}
+		headers[i] = scanner.CanonicalBatchHeader{Number: value, Hash: hash, ParentHash: parent}
+	}
+	return headers, nil
+}
+
+func isUnsupportedBatchError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "batch") && (strings.Contains(message, "not supported") || strings.Contains(message, "unsupported"))
 }
 
 func (client *canonicalRPC) BlockHashByNumber(ctx context.Context, number *big.Int) (common.Hash, error) {
@@ -625,6 +741,7 @@ func healthHandlerWithSessions(store *sqlite.Store, manager *runtimeManager, met
 func healthHandlerWithRuntimeOperations(store *sqlite.Store, manager *runtimeManager, metrics http.Handler, uiDirectory string, uiSessions *uiSessionManager, operationalEvents *operationalEventBuffer, progress *scannerProgressTracker, operationSets ...any) http.Handler {
 	operations := newEngineOperations(store, config.RetentionConfig{})
 	environment := config.EnvironmentConfig{}
+	backfillConfig := config.BackfillConfig{MaxRange: 100000}
 	var operationalMetrics *observability.Metrics
 	for _, option := range operationSets {
 		switch value := option.(type) {
@@ -636,10 +753,24 @@ func healthHandlerWithRuntimeOperations(store *sqlite.Store, manager *runtimeMan
 			environment = value
 		case *observability.Metrics:
 			operationalMetrics = value
+		case config.BackfillConfig:
+			backfillConfig = value
 		}
 	}
 	mux := http.NewServeMux()
 	if strings.TrimSpace(uiDirectory) != "" {
+		mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path != "/" {
+				http.NotFound(writer, request)
+				return
+			}
+			if request.Method != http.MethodGet && request.Method != http.MethodHead {
+				writer.Header().Set("Allow", "GET, HEAD")
+				writer.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			http.Redirect(writer, request, "/ui/", http.StatusMovedPermanently)
+		})
 		mux.Handle("/ui/", newUIHandler(uiDirectory))
 		mux.HandleFunc("/ui", func(writer http.ResponseWriter, request *http.Request) {
 			if request.Method != http.MethodGet && request.Method != http.MethodHead {
@@ -699,7 +830,13 @@ func healthHandlerWithRuntimeOperations(store *sqlite.Store, manager *runtimeMan
 	mux.Handle("/api/v1/rpc-listeners", authenticateAPIKey(store, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		handleRPCListenersCollection(store, writer, request)
 	}), uiSessions))
+	skips := newScannerSkipService(store, manager)
 	mux.Handle("/api/v1/rpc-listeners/", authenticateAPIKey(store, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		parts := strings.Split(strings.TrimPrefix(request.URL.Path, "/api/v1/rpc-listeners/"), "/")
+		if len(parts) > 1 && (parts[1] == "skip-to-head" || parts[1] == "skip-audit") {
+			skips.handle(writer, request)
+			return
+		}
 		handleRPCListenersResource(store, writer, request)
 	}), uiSessions))
 	mux.Handle("/api/v1/rpc-listener-audit", authenticateAPIKey(store, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -714,6 +851,9 @@ func healthHandlerWithRuntimeOperations(store *sqlite.Store, manager *runtimeMan
 	mux.Handle("/api/v1/delivery-requeue-audit", authenticateAPIKey(store, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		handleDeliveryRequeueAudit(store, writer, request)
 	}), uiSessions))
+	mux.Handle("/api/v1/backfills", authenticateAPIKey(store, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handleBackfills(store, backfillConfig.MaxRange, w, r) }), uiSessions))
+	mux.Handle("/api/v1/backfills/", authenticateAPIKey(store, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handleBackfills(store, backfillConfig.MaxRange, w, r) }), uiSessions))
+	mux.Handle("/api/v1/backfill-audit", authenticateAPIKey(store, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handleBackfillAudit(store, w, r) }), uiSessions))
 	mux.Handle("/api/v1/scanner-progress", authenticateAPIKey(store, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		handleScannerProgress(progress, writer, request)
 	}), uiSessions))

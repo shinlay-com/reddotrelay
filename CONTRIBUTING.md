@@ -21,7 +21,7 @@ the maintainers publish a contributor agreement and reopen code contributions.
 
 ## Development
 
-Install Go 1.25+, Node.js 22+, and Docker when testing the image. Run:
+Install Go 1.27.1, Node.js 22+, and Docker when testing the image. Run:
 
 ```text
 ./scripts/validate.ps1

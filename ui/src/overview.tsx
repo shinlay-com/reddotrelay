@@ -47,7 +47,8 @@ export function Overview({ data, sessionName, refreshing, onRefresh }: { data: D
     if (listener.paused) return "paused";
     if (runtimeByID.get(listener.id)?.state === "idle") return "idle";
     const scanner = progressByID.get(listener.id);
-    if (!scanner || scanner.lastError) return "failed";
+    if (scanner?.lastError) return "failed";
+    if (!scanner) return runtimeByID.get(listener.id)?.state === "running" ? "lagging" : "failed";
     if (scanner.lagBlocks > 0) return "lagging";
     return runtimeByID.get(listener.id)?.state === "running" ? "synced" : "failed";
   }

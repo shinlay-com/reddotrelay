@@ -490,6 +490,8 @@ func writeMutationError(writer http.ResponseWriter, revision uint64, err error) 
 		writeAPIError(writer, http.StatusPreconditionFailed, "configuration revision does not match")
 	case errors.Is(err, sqlite.ErrNotFound):
 		writeAPIError(writer, http.StatusNotFound, "configuration resource not found")
+	case errors.Is(err, sqlite.ErrRPCCredentialEncryptionKeyRequired):
+		writeAPIError(writer, http.StatusUnprocessableEntity, "RPC credentials require security.rpc_credentials_key_ref")
 	default:
 		writeAPIError(writer, http.StatusInternalServerError, "internal server error")
 	}

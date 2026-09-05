@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/big"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,6 +35,25 @@ func TestScanOnceBatchesOnlyConfirmedBlocks(t *testing.T) {
 	}
 	if got := processor.checkpointNumbers(); !reflect.DeepEqual(got, []uint64{4, 8, 10}) {
 		t.Fatalf("persisted checkpoints = %v", got)
+	}
+}
+
+func TestSafeScanErrorClassifiesBlockVerificationFailures(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"missing block hash", errors.New("verify block 1030033 hash: RPC returned an empty block hash"), "RPC provider returned no block hash while verifying block data"},
+		{"incomplete header", errors.New("verify block 1030033: missing required field 'parentHash' for Header"), "RPC provider returned an incomplete block header while verifying block data"},
+		{"inconsistent ancestry", errors.New("block 1030034 does not descend from block 1030033"), "RPC provider returned inconsistent block ancestry while verifying block data"},
+		{"unknown response", errors.New("verify block 1030033: unsupported provider result"), "RPC provider returned a block response that could not be safely verified while verifying block data; confirm it supports standard eth_getBlockByNumber responses for historical blocks"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := safeScanError(test.err); got != test.want {
+				t.Fatalf("safeScanError() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -85,6 +105,95 @@ func TestScanOnceUsesCanonicalRPCHashInsteadOfLocallyComputedHeaderHash(t *testi
 	}
 	if got := processor.commits[0].BlockHash; got != canonicalTwo.Hex() {
 		t.Fatalf("checkpoint hash = %s, want canonical RPC hash %s", got, canonicalTwo.Hex())
+	}
+}
+
+func TestScanOnceUsesBatchHeaderRetrieval(t *testing.T) {
+	rpc := newMockRPC(3)
+	rpc.logs = []types.Log{{
+		BlockNumber: 3, BlockHash: rpc.headers[3].Hash(), TxHash: common.HexToHash("0xabc"),
+		Index: 1, Address: common.HexToAddress("0x123"),
+	}}
+	checkpoints := &mockCheckpoints{checkpoint: core.Checkpoint{
+		ChainID: 1, BlockNumber: 1, BlockHash: rpc.headers[1].Hash().Hex(),
+	}}
+	processor := &mockProcessor{checkpoints: checkpoints}
+	scanned := newScanner(t, rpc, checkpoints, processor, Options{
+		ChainID: 1, StartBlock: 1, BatchSize: 3,
+	})
+
+	if err := scanned.ScanOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if rpc.batchHeaderCalls != 1 {
+		t.Fatalf("batch header calls = %d, want 1", rpc.batchHeaderCalls)
+	}
+	if rpc.batchFallbackCalls > 1 {
+		t.Fatalf("unexpected extra fallback verification: %d", rpc.batchFallbackCalls)
+	}
+}
+
+func TestScanOnceFallsBackWhenBatchHeadersUnsupported(t *testing.T) {
+	rpc := newMockRPC(3)
+	rpc.batchUnsupported = true
+	rpc.logs = []types.Log{{
+		BlockNumber: 3, BlockHash: rpc.headers[3].Hash(), TxHash: common.HexToHash("0xabc"),
+		Index: 1, Address: common.HexToAddress("0x123"),
+	}}
+	checkpoints := &mockCheckpoints{checkpoint: core.Checkpoint{
+		ChainID: 1, BlockNumber: 1, BlockHash: rpc.headers[1].Hash().Hex(),
+	}}
+	processor := &mockProcessor{checkpoints: checkpoints}
+	scanned := newScanner(t, rpc, checkpoints, processor, Options{
+		ChainID: 1, StartBlock: 1, BatchSize: 3,
+	})
+
+	if err := scanned.ScanOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if rpc.batchHeaderCalls != 1 {
+		t.Fatalf("batch header calls = %d, want 1", rpc.batchHeaderCalls)
+	}
+	if rpc.batchFallbackCalls == 0 {
+		t.Fatal("sequential fallback was not used")
+	}
+}
+
+func TestVerificationLimiterIsSharedAcrossScanners(t *testing.T) {
+	rpc := newMockRPC(3)
+	rpc.blockUntil = make(chan struct{})
+	rpc.logs = []types.Log{{
+		BlockNumber: 3, BlockHash: rpc.headers[3].Hash(), TxHash: common.HexToHash("0xabc"),
+		Index: 1, Address: common.HexToAddress("0x123"),
+	}}
+	shared := make(chan struct{}, 1)
+	firstCheckpoints := &mockCheckpoints{checkpoint: core.Checkpoint{ChainID: 1, BlockNumber: 1, BlockHash: rpc.headers[1].Hash().Hex()}}
+	secondCheckpoints := &mockCheckpoints{checkpoint: core.Checkpoint{ChainID: 1, BlockNumber: 1, BlockHash: rpc.headers[1].Hash().Hex()}}
+	first := newScanner(t, rpc, firstCheckpoints, &mockProcessor{checkpoints: firstCheckpoints}, Options{ChainID: 1, StartBlock: 1, BatchSize: 3, VerificationConcurrency: 1, VerificationLimiter: shared})
+	second := newScanner(t, rpc, secondCheckpoints, &mockProcessor{checkpoints: secondCheckpoints}, Options{ChainID: 1, StartBlock: 1, BatchSize: 3, VerificationConcurrency: 1, VerificationLimiter: shared})
+
+	started := make(chan struct{}, 2)
+	done := make(chan error, 2)
+	go func() {
+		started <- struct{}{}
+		done <- first.ScanOnce(context.Background())
+	}()
+	<-started
+	time.Sleep(50 * time.Millisecond)
+	go func() {
+		started <- struct{}{}
+		done <- second.ScanOnce(context.Background())
+	}()
+	<-started
+	if got := atomic.LoadInt32(&rpc.activeBatchCalls); got != 1 {
+		t.Fatalf("active batch calls = %d, want 1 while limiter is shared", got)
+	}
+	close(rpc.blockUntil)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -305,14 +414,21 @@ func TestReorgDuringEmptyLogQueryDoesNotAdvanceCheckpoint(t *testing.T) {
 }
 
 type mockRPC struct {
-	latest          uint64
-	headers         map[uint64]*types.Header
-	canonicalHashes map[uint64]common.Hash
-	logs            []types.Log
-	ranges          [][2]uint64
-	latestFailures  int
-	chainID         int64
-	afterFilter     func()
+	latest             uint64
+	headers            map[uint64]*types.Header
+	canonicalHashes    map[uint64]common.Hash
+	logs               []types.Log
+	ranges             [][2]uint64
+	latestFailures     int
+	chainID            int64
+	afterFilter        func()
+	batchUnsupported   bool
+	batchHeaderCalls   int
+	batchFallbackCalls int
+	headerCalls        int
+	blockHashCalls     int
+	activeBatchCalls   int32
+	blockUntil         chan struct{}
 }
 
 func newMockRPC(latest uint64) *mockRPC {
@@ -331,6 +447,7 @@ func newMockRPC(latest uint64) *mockRPC {
 }
 
 func (m *mockRPC) HeaderByNumber(_ context.Context, number *big.Int) (*types.Header, error) {
+	m.headerCalls++
 	if number == nil {
 		if m.latestFailures > 0 {
 			m.latestFailures--
@@ -354,6 +471,19 @@ func (m *mockRPC) BlockHashByNumber(_ context.Context, number *big.Int) (common.
 
 func (m *mockRPC) ChainID(context.Context) (*big.Int, error) { return big.NewInt(m.chainID), nil }
 
+func (m *mockRPC) CanonicalHeaderByNumber(_ context.Context, number *big.Int) (common.Hash, common.Hash, error) {
+	m.batchFallbackCalls++
+	blockNumber := m.latest
+	if number != nil {
+		blockNumber = number.Uint64()
+	}
+	if hash, ok := m.canonicalHashes[blockNumber]; ok {
+		return hash, m.headers[blockNumber].ParentHash, nil
+	}
+	header := m.headers[blockNumber]
+	return header.Hash(), header.ParentHash, nil
+}
+
 func (m *mockRPC) FilterLogs(_ context.Context, query ethereum.FilterQuery) ([]types.Log, error) {
 	from, to := query.FromBlock.Uint64(), query.ToBlock.Uint64()
 	m.ranges = append(m.ranges, [2]uint64{from, to})
@@ -369,10 +499,49 @@ func (m *mockRPC) FilterLogs(_ context.Context, query ethereum.FilterQuery) ([]t
 	return logs, nil
 }
 
+func (m *mockRPC) CanonicalHeadersByNumber(ctx context.Context, numbers []*big.Int) ([]CanonicalBatchHeader, error) {
+	m.batchHeaderCalls++
+	if m.batchUnsupported {
+		return nil, errors.New("batch not supported")
+	}
+	if m.blockUntil != nil {
+		atomic.AddInt32(&m.activeBatchCalls, 1)
+		defer atomic.AddInt32(&m.activeBatchCalls, -1)
+		select {
+		case <-m.blockUntil:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	headers := make([]CanonicalBatchHeader, len(numbers))
+	for i, number := range numbers {
+		if number == nil {
+			headers[i] = CanonicalBatchHeader{Number: 0, Hash: m.headers[0].Hash(), ParentHash: common.Hash{}}
+			continue
+		}
+		header := m.headers[number.Uint64()]
+		headers[i] = CanonicalBatchHeader{Number: number.Uint64(), Hash: header.Hash(), ParentHash: header.ParentHash}
+	}
+	return headers, nil
+}
+
 type mockCheckpoints struct {
 	checkpoint core.Checkpoint
 	err        error
 	resets     []uint64
+	history    []core.CanonicalBlock
+	rewinds    []uint64
+}
+
+func (m *mockCheckpoints) CanonicalBlocks(context.Context, uint64, uint64) ([]core.CanonicalBlock, error) {
+	return m.history, nil
+}
+func (m *mockCheckpoints) RewindCanonical(_ context.Context, _ uint64, from uint64, hash string) error {
+	m.rewinds = append(m.rewinds, from)
+	m.checkpoint.BlockNumber = from - 1
+	m.checkpoint.BlockHash = hash
+	m.err = nil
+	return nil
 }
 
 func (m *mockCheckpoints) Checkpoint(context.Context, uint64) (core.Checkpoint, error) {

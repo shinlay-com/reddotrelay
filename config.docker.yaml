@@ -16,6 +16,9 @@ log:
 storage:
   path: /var/lib/reddotrelay/reddotrelay-dev.db
 
+security:
+  rpc_credentials_key_ref: env://REDDOTRELAY_RPC_CREDENTIALS_KEY
+
 delivery:
   workers: 4
   batch_size: 4

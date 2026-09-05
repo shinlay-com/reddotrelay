@@ -3,6 +3,9 @@ services:
     build: .
     restart: unless-stopped
     command: ["-config", "/etc/reddotrelay/config.yaml"]
+    environment:
+      # Development-only default. Override this in .env for any persistent local data.
+      REDDOTRELAY_RPC_CREDENTIALS_KEY: ${REDDOTRELAY_RPC_CREDENTIALS_KEY:-local-development-rpc-credentials-key}
     volumes:
       - ./config.docker.yaml:/etc/reddotrelay/config.yaml:ro
       - reddotrelay-data:/var/lib/reddotrelay

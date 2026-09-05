@@ -76,7 +76,7 @@ docker compose down -v
 docker compose up --build -d
 ```
 
-For a local source build, install Go 1.25+ and Node.js 24+, then run:
+For a local source build, install Go 1.27.1 and Node.js 24+, then run:
 
 ```powershell
 Copy-Item config.example.yaml config.yaml
@@ -87,16 +87,51 @@ go run ./cmd/reddotrelay -config config.yaml
 
 ## Features
 
-- Confirmed `eth_getLogs` scanning with durable checkpoints and reorg recovery.
-- ABI event decoding, deterministic event IDs, and SQLite persistence.
-- At-least-once webhook delivery with retries and dead letters.
-- Embedded management UI and authenticated REST API.
-- Flexible upstream RPC authentication: HTTP Basic, static Bearer tokens,
-  custom headers (including API keys), Ethereum Engine JWT, and provider JWT
+RedDotRelay combines reliable chain synchronization, durable webhook delivery,
+and operational visibility in a single self-hosted Engine.
+
+### Reliable chain monitoring
+
+- **Confirmed scanning:** Follows confirmed EVM logs with durable checkpoints.
+- **Reorg safety:** Validates canonical block and parent hashes before commit.
+- **Complete history:** Preserves empty blocks and only advances checkpoints
+  after durable persistence.
+
+### Efficient synchronization
+
+- **Batch verification:** Retrieves block headers through JSON-RPC batch
+  requests for efficient synchronization.
+- **Provider compatibility:** Falls back automatically to individual requests
+  when batching is unavailable.
+- **Shared RPC budget:** Applies `verification_concurrency` process-wide across
+  live listeners and backfill jobs.
+
+### Event delivery you can trust
+
+- **Deterministic events:** Decodes ABI events into stable event IDs and stores
+  them in SQLite.
+- **Durable delivery:** Provides at-least-once delivery, retries, and dead
+  letters.
+- **Atomic outbox:** Creates event and delivery records together so temporary
+  receiver failures do not lose events.
+
+### Operations and visibility
+
+- **Embedded administration:** Manages listeners, backfills, deliveries, and
+  configuration through the UI or authenticated REST API.
+- **Performance session:** Shows verification timing and scanner progress on
+  the Overview page.
+- **Clear listener state:** Distinguishes an active `Catching up` listener from
+  a stalled or failed listener.
+
+### Secure RPC configuration
+
+- **Authentication options:** Supports HTTP Basic, static Bearer tokens,
+  custom headers including API keys, Ethereum Engine JWT, and provider JWT
   token endpoints.
-- Credential values are encrypted locally with the Engine operator key and are
-  write-only: they are never returned by the UI, API, exports, audits, metrics,
-  or logs.
+- **Local protection:** Encrypts credential values with the Engine operator
+  key and keeps them write-only across the UI, API, exports, audits, metrics,
+  and logs.
 
 YAML contains static process settings. Listener, contract, webhook, user, API key, retention, and audit configuration is managed through the authenticated UI or API and stored in SQLite. Keep credential-bearing values in environment or file references; never commit secrets.
 

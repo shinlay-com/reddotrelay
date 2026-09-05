@@ -30,6 +30,8 @@ func TestOpenAPIContractStructureAndRoutes(t *testing.T) {
 	}
 	sort.Strings(got)
 	want := []string{
+		"GET /api/v1/backfills", "GET /api/v1/backfills/{id}", "GET /api/v1/backfill-audit",
+		"POST /api/v1/backfills", "POST /api/v1/backfills/preview", "POST /api/v1/backfills/{id}/pause", "POST /api/v1/backfills/{id}/resume", "POST /api/v1/backfills/{id}/cancel",
 		"GET /api/v1/api-keys", "POST /api/v1/api-keys", "POST /api/v1/api-keys/{keyId}/{operation}",
 		"GET /api/v1/build-info", "GET /api/v1/storage/status", "GET /api/v1/retention/status",
 		"DELETE /api/v1/ui-session",
@@ -63,6 +65,9 @@ func TestOpenAPIContractStructureAndRoutes(t *testing.T) {
 		"POST /api/v1/connection-tests/webhook",
 		"POST /api/v1/deliveries/{deliveryId}/requeue",
 		"POST /api/v1/rpc-listeners/{rpcListenerId}/pause",
+		"POST /api/v1/rpc-listeners/{rpcListenerId}/skip-to-head/preview",
+		"POST /api/v1/rpc-listeners/{rpcListenerId}/skip-to-head",
+		"GET /api/v1/rpc-listeners/{rpcListenerId}/skip-audit",
 		"POST /api/v1/rpc-listeners/{rpcListenerId}/resume",
 		"POST /api/v1/rpc-listeners/{rpcListenerId}/contracts",
 		"POST /api/v1/rpc-listeners/{rpcListenerId}/contracts/{contractId}/events",
@@ -95,7 +100,7 @@ func TestOpenAPIMutationsRequireRevisionAndReferencesResolve(t *testing.T) {
 			if path == "/api/v1/ui-session" || path == "/api/v1/ui-setup" ||
 				strings.HasPrefix(path, "/api/v1/users") || strings.HasPrefix(path, "/api/v1/api-keys") ||
 				strings.HasPrefix(path, "/api/v1/connection-tests/") || strings.HasPrefix(path, "/api/v1/deliveries/") ||
-				strings.HasPrefix(path, "/api/v1/retention/") || path == "/api/v1/storage/optimize" {
+				strings.HasPrefix(path, "/api/v1/retention/") || strings.HasPrefix(path, "/api/v1/backfills") || path == "/api/v1/storage/optimize" {
 				continue
 			}
 			operation := object(t, rawOperation, method+" "+path)

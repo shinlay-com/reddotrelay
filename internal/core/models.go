@@ -27,6 +27,15 @@ type Checkpoint struct {
 	BlockHash   string
 }
 
+// CanonicalBlock is the bounded, durable proof used to recover precisely from
+// an accepted-chain reorganization. Empty blocks are represented too.
+type CanonicalBlock struct {
+	ChainID    uint64
+	Number     uint64
+	Hash       string
+	ParentHash string
+}
+
 type Delivery struct {
 	ID             string
 	EventID        EventID

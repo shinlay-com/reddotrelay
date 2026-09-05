@@ -28,9 +28,33 @@ type RPC interface {
 	FilterLogs(context.Context, ethereum.FilterQuery) ([]types.Log, error)
 }
 
+type CanonicalBatchHeader struct {
+	Number     uint64
+	Hash       common.Hash
+	ParentHash common.Hash
+}
+
+// canonicalHeaderRPC allows providers that expose the canonical block hash
+// and parent hash together to avoid a second eth_getBlockByNumber call.
+type canonicalHeaderRPC interface {
+	CanonicalHeaderByNumber(context.Context, *big.Int) (common.Hash, common.Hash, error)
+}
+
+// canonicalBatchHeaderRPC allows providers to verify a contiguous block range
+// in one batch request when the JSON-RPC transport supports batching.
+type canonicalBatchHeaderRPC interface {
+	canonicalHeaderRPC
+	CanonicalHeadersByNumber(context.Context, []*big.Int) ([]CanonicalBatchHeader, error)
+}
+
 type Checkpoints interface {
 	Checkpoint(context.Context, uint64) (core.Checkpoint, error)
 	ResetFrom(context.Context, uint64, uint64) error
+}
+
+type canonicalHistory interface {
+	CanonicalBlocks(context.Context, uint64, uint64) ([]core.CanonicalBlock, error)
+	RewindCanonical(context.Context, uint64, uint64, string) error
 }
 
 // BatchProcessor must durably process all logs and commit the checkpoint in one
@@ -39,19 +63,25 @@ type BatchProcessor interface {
 	ProcessBatch(context.Context, []core.RawLog, core.Checkpoint) error
 }
 
+type canonicalBatchProcessor interface {
+	ProcessCanonicalBatch(context.Context, []core.RawLog, []core.CanonicalBlock, core.Checkpoint, uint64) error
+}
+
 type Options struct {
-	ListenerID    string
-	ChainID       uint64
-	StartBlock    uint64
-	BatchSize     uint64
-	Confirmations uint64
-	ReorgDepth    uint64
-	PollInterval  time.Duration
-	RetryAttempts int
-	RetryBackoff  time.Duration
-	RPCTimeout    time.Duration
-	Addresses     []common.Address
-	Topics        [][]common.Hash
+	ListenerID              string
+	ChainID                 uint64
+	StartBlock              uint64
+	BatchSize               uint64
+	Confirmations           uint64
+	ReorgDepth              uint64
+	PollInterval            time.Duration
+	RetryAttempts           int
+	RetryBackoff            time.Duration
+	RPCTimeout              time.Duration
+	VerificationConcurrency int
+	VerificationLimiter     chan struct{}
+	Addresses               []common.Address
+	Topics                  [][]common.Hash
 }
 
 type Observer interface {
@@ -67,6 +97,29 @@ type Observer interface {
 // escape through status APIs or logs.
 type ErrorObserver interface {
 	ScanError(listenerID string, chainID uint64, detail string, at time.Time)
+}
+
+// CheckpointObserver receives the effective checkpoint before a scan cycle
+// reports its head. On an unstarted listener this is StartBlock-1, which keeps
+// operational lag relative to the configured scan range rather than block 0.
+type CheckpointObserver interface {
+	CheckpointLoaded(listenerID string, chainID, checkpoint uint64)
+}
+
+// BatchFetchObserver receives the duration of the eth_getLogs request only.
+// It deliberately excludes header verification, decoding, and persistence.
+type BatchFetchObserver interface {
+	BatchFetched(listenerID string, chainID, from, to uint64, duration time.Duration)
+}
+
+// BatchVerificationObserver receives the duration of block-header and hash
+// verification for a confirmed batch.
+type BatchVerificationObserver interface {
+	BatchVerified(listenerID string, chainID, from, to uint64, duration time.Duration)
+}
+
+type ReorgObserver interface {
+	ReorgResolved(string, uint64, string, uint64)
 }
 
 type noopObserver struct{}
@@ -151,10 +204,27 @@ func safeScanError(err error) string {
 		operation = "verifying the chain ID"
 	case strings.Contains(message, "checkpoint") || strings.Contains(message, "persist block batch"):
 		operation = "reading or saving the scanner checkpoint"
-	case strings.Contains(message, "snapshot block") || strings.Contains(message, "verify block"):
+	case strings.Contains(message, "snapshot block") || strings.Contains(message, "verify block") || strings.Contains(message, "does not descend from") || strings.Contains(message, "chain changed while querying logs") || strings.Contains(message, "block hash changed while scanning"):
 		operation = "verifying block data"
 	}
 	switch {
+	case strings.Contains(message, "returned a nil header"):
+		return "RPC provider returned no block header while " + operation
+	case strings.Contains(message, "returned a nil block") || strings.Contains(message, "returned an empty block hash"):
+		return "RPC provider returned no block hash while " + operation
+	case strings.Contains(message, "returned block") && strings.Contains(message, "requested block"):
+		return "RPC provider returned a different block than requested while " + operation
+	case strings.Contains(message, "missing required field") ||
+		strings.Contains(message, "invalid block header") ||
+		strings.Contains(message, "invalid header"):
+		return "RPC provider returned an incomplete block header while " + operation
+	case strings.Contains(message, "does not descend from") ||
+		strings.Contains(message, "chain changed while querying logs") ||
+		strings.Contains(message, "block hash changed while scanning"):
+		return "RPC provider returned inconsistent block ancestry while " + operation
+	case strings.Contains(message, "returned invalid log") ||
+		strings.Contains(message, "outside the requested address/topic filter"):
+		return "RPC provider returned invalid event data while " + operation
 	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(message, "deadline exceeded") || strings.Contains(message, "timeout"):
 		return "Timeout while " + operation
 	case strings.Contains(message, "x509") || strings.Contains(message, "certificate") || strings.Contains(message, "tls handshake"):
@@ -175,7 +245,7 @@ func safeScanError(err error) string {
 		return "RPC provider rejected the request while " + operation
 	case strings.Contains(message, "500") || strings.Contains(message, "502") || strings.Contains(message, "503") || strings.Contains(message, "504"):
 		return "RPC provider is unavailable while " + operation
-	case strings.Contains(message, "invalid character") || strings.Contains(message, "unmarshal") || strings.Contains(message, "invalid json"):
+	case strings.Contains(message, "invalid character") || strings.Contains(message, "unmarshal") || strings.Contains(message, "invalid json") || strings.Contains(message, "invalid hex"):
 		return "RPC provider returned an invalid response while " + operation
 	case strings.Contains(message, "does not match configured chain id"):
 		return "RPC endpoint chain ID does not match the configured chain ID"
@@ -184,7 +254,7 @@ func safeScanError(err error) string {
 	case strings.Contains(message, "persist") || strings.Contains(message, "checkpoint") || strings.Contains(message, "database") || strings.Contains(message, "sqlite"):
 		return "SQLite persistence failed while " + operation
 	default:
-		return "RPC or persistence failure while " + operation
+		return "RPC provider returned a block response that could not be safely verified while " + operation + "; confirm it supports standard eth_getBlockByNumber responses for historical blocks"
 	}
 }
 
@@ -205,12 +275,21 @@ func (s *Scanner) ScanOnce(ctx context.Context) error {
 		return nil
 	}
 	confirmedHead := latestNumber - s.options.Confirmations
-	s.observer.Head(s.options.ListenerID, s.options.ChainID, latestNumber, confirmedHead)
-
 	next, err := s.resumeBlock(ctx, latestNumber)
 	if err != nil {
 		return err
 	}
+	if observer, ok := s.observer.(CheckpointObserver); ok {
+		// resumeBlock starts from StartBlock when no checkpoint exists. The
+		// preceding block is the logical initial checkpoint; it is not written
+		// to storage until the first verified batch commits.
+		checkpoint := uint64(0)
+		if next > 0 {
+			checkpoint = next - 1
+		}
+		observer.CheckpointLoaded(s.options.ListenerID, s.options.ChainID, checkpoint)
+	}
+	s.observer.Head(s.options.ListenerID, s.options.ChainID, latestNumber, confirmedHead)
 	if next > confirmedHead {
 		return nil
 	}
@@ -228,11 +307,16 @@ func (s *Scanner) ScanOnce(ctx context.Context) error {
 		if to < from || to > confirmedHead {
 			to = confirmedHead
 		}
-		logs, checkpoint, err := s.fetchVerifiedBatch(ctx, from, to, expectedParent)
+		logs, blocks, checkpoint, err := s.fetchVerifiedBatch(ctx, from, to, expectedParent)
 		if err != nil {
 			return err
 		}
-		if err := s.processor.ProcessBatch(ctx, logs, checkpoint); err != nil {
+		if processor, ok := s.processor.(canonicalBatchProcessor); ok {
+			err = processor.ProcessCanonicalBatch(ctx, logs, blocks, checkpoint, s.options.ReorgDepth+1)
+		} else {
+			err = s.processor.ProcessBatch(ctx, logs, checkpoint)
+		}
+		if err != nil {
 			return fmt.Errorf("persist block batch %d-%d: %w", from, to, err)
 		}
 		s.observer.BatchCommitted(s.options.ListenerID, s.options.ChainID, checkpoint.BlockNumber, confirmedHead, len(logs))
@@ -243,6 +327,19 @@ func (s *Scanner) ScanOnce(ctx context.Context) error {
 		from = to + 1
 	}
 	return nil
+}
+
+// FetchRange performs the same bounded RPC verification as live scanning but
+// does not move the live checkpoint. It is used by durable backfill jobs.
+func (s *Scanner) FetchRange(ctx context.Context, from, to uint64) ([]core.RawLog, error) {
+	if from > to || to-from+1 > s.options.BatchSize {
+		return nil, errors.New("backfill range exceeds scanner batch size")
+	}
+	if err := s.verifyChainID(ctx); err != nil {
+		return nil, err
+	}
+	logs, _, _, err := s.fetchVerifiedBatch(ctx, from, to, "")
+	return logs, err
 }
 
 func (s *Scanner) resumeBlock(ctx context.Context, latestNumber uint64) (uint64, error) {
@@ -275,6 +372,32 @@ func (s *Scanner) resumeBlock(ctx context.Context, latestNumber uint64) (uint64,
 		}
 		return checkpoint.BlockNumber + 1, nil
 	}
+	if history, ok := s.checkpoints.(canonicalHistory); ok {
+		blocks, historyErr := history.CanonicalBlocks(ctx, s.options.ChainID, s.options.ReorgDepth+1)
+		if historyErr != nil {
+			return 0, fmt.Errorf("load canonical history: %w", historyErr)
+		}
+		for _, block := range blocks {
+			if block.Number > latestNumber {
+				continue
+			}
+			canonical, rpcErr := s.blockHashByNumber(ctx, new(big.Int).SetUint64(block.Number))
+			if rpcErr != nil {
+				return 0, fmt.Errorf("verify canonical ancestor %d: %w", block.Number, rpcErr)
+			}
+			if canonical.Hex() == block.Hash {
+				if err := history.RewindCanonical(ctx, s.options.ChainID, block.Number+1, block.Hash); err != nil {
+					return 0, fmt.Errorf("rewind after reorg: %w", err)
+				}
+				s.logger.Warn("chain reorganization detected", "chain_id", s.options.ChainID, "checkpoint", checkpoint.BlockNumber, "ancestor", block.Number, "rescan_from", block.Number+1)
+				s.observer.Reorg(s.options.ListenerID, s.options.ChainID)
+				if observer, ok := s.observer.(ReorgObserver); ok {
+					observer.ReorgResolved(s.options.ListenerID, s.options.ChainID, "precise", checkpoint.BlockNumber-block.Number)
+				}
+				return block.Number + 1, nil
+			}
+		}
+	}
 
 	// Only the latest checkpoint hash is durable, so there is no earlier hash
 	// with which to prove a common ancestor. Resetting inclusively to the
@@ -287,73 +410,162 @@ func (s *Scanner) resumeBlock(ctx context.Context, latestNumber uint64) (uint64,
 		"checkpoint", checkpoint.BlockNumber, "rescan_from", s.options.StartBlock,
 		"configured_reorg_depth", s.options.ReorgDepth)
 	s.observer.Reorg(s.options.ListenerID, s.options.ChainID)
+	if observer, ok := s.observer.(ReorgObserver); ok {
+		observer.ReorgResolved(s.options.ListenerID, s.options.ChainID, "fallback", checkpoint.BlockNumber-s.options.StartBlock)
+	}
 	return s.options.StartBlock, nil
 }
 
-func (s *Scanner) fetchVerifiedBatch(ctx context.Context, from, to uint64, expectedParent string) ([]core.RawLog, core.Checkpoint, error) {
+func (s *Scanner) fetchVerifiedBatch(ctx context.Context, from, to uint64, expectedParent string) ([]core.RawLog, []core.CanonicalBlock, core.Checkpoint, error) {
 	endNumber := new(big.Int).SetUint64(to)
-	_, err := s.headerByNumber(ctx, endNumber)
+	endHeader, err := s.headerByNumber(ctx, endNumber)
 	if err != nil {
-		return nil, core.Checkpoint{}, fmt.Errorf("snapshot block %d before log query: %w", to, err)
+		return nil, nil, core.Checkpoint{}, fmt.Errorf("snapshot block %d before log query: %w", to, err)
 	}
-	beforeEndHash, err := s.blockHashByNumber(ctx, endNumber)
-	if err != nil {
-		return nil, core.Checkpoint{}, fmt.Errorf("snapshot block %d hash before log query: %w", to, err)
+	beforeEndHash := endHeader.Hash()
+	if canonical, ok := s.rpc.(canonicalHeaderRPC); ok {
+		beforeEndHash, _, err = s.canonicalHeaderByNumber(ctx, canonical, endNumber)
+		if err != nil {
+			return nil, nil, core.Checkpoint{}, fmt.Errorf("snapshot block %d hash before log query: %w", to, err)
+		}
+	} else {
+		beforeEndHash, err = s.blockHashByNumber(ctx, endNumber)
+		if err != nil {
+			return nil, nil, core.Checkpoint{}, fmt.Errorf("snapshot block %d hash before log query: %w", to, err)
+		}
 	}
 	query := ethereum.FilterQuery{
 		FromBlock: new(big.Int).SetUint64(from), ToBlock: new(big.Int).SetUint64(to),
 		Addresses: s.options.Addresses, Topics: s.options.Topics,
 	}
+	fetchStarted := time.Now()
 	logs, err := s.filterLogs(ctx, query)
+	fetchDuration := time.Since(fetchStarted)
 	if err != nil {
-		return nil, core.Checkpoint{}, fmt.Errorf("get logs for blocks %d-%d: %w", from, to, err)
+		return nil, nil, core.Checkpoint{}, fmt.Errorf("get logs for blocks %d-%d: %w", from, to, err)
+	}
+	if observer, ok := s.observer.(BatchFetchObserver); ok {
+		observer.BatchFetched(s.options.ListenerID, s.options.ChainID, from, to, fetchDuration)
 	}
 
-	headers := make(map[uint64]*types.Header)
-	hashes := make(map[uint64]common.Hash)
 	for _, log := range logs {
 		if log.Removed || log.BlockNumber < from || log.BlockNumber > to {
-			return nil, core.Checkpoint{}, fmt.Errorf("RPC returned invalid log at block %d", log.BlockNumber)
+			return nil, nil, core.Checkpoint{}, fmt.Errorf("RPC returned invalid log at block %d", log.BlockNumber)
 		}
 		if !matchesFilter(log, query) {
-			return nil, core.Checkpoint{}, fmt.Errorf("RPC returned log outside the requested address/topic filter at block %d", log.BlockNumber)
+			return nil, nil, core.Checkpoint{}, fmt.Errorf("RPC returned log outside the requested address/topic filter at block %d", log.BlockNumber)
 		}
-		headers[log.BlockNumber] = nil
 	}
-	headers[from] = nil
-	headers[to] = nil
-	for number := range headers {
-		header, err := s.headerByNumber(ctx, new(big.Int).SetUint64(number))
-		if err != nil {
-			return nil, core.Checkpoint{}, fmt.Errorf("verify block %d: %w", number, err)
+	headers := make(map[uint64]*types.Header, to-from+1)
+	hashes := make(map[uint64]common.Hash, to-from+1)
+	verifyStarted := time.Now()
+	if batch, ok := s.rpc.(canonicalBatchHeaderRPC); ok {
+		numbers := make([]*big.Int, 0, to-from+1)
+		for number := from; number <= to; number++ {
+			numbers = append(numbers, new(big.Int).SetUint64(number))
 		}
-		headers[number] = header
-		hash, err := s.blockHashByNumber(ctx, new(big.Int).SetUint64(number))
+		headersByNumber, err := s.canonicalHeadersByNumber(ctx, batch, numbers)
 		if err != nil {
-			return nil, core.Checkpoint{}, fmt.Errorf("verify block %d hash: %w", number, err)
+			return nil, nil, core.Checkpoint{}, fmt.Errorf("verify block range: %w", err)
 		}
-		hashes[number] = hash
+		for _, item := range headersByNumber {
+			headers[item.Number] = &types.Header{Number: new(big.Int).SetUint64(item.Number), ParentHash: item.ParentHash}
+			hashes[item.Number] = item.Hash
+		}
+		headers[to] = endHeader
+		hashes[to] = beforeEndHash
+	} else if canonical, ok := s.rpc.(canonicalHeaderRPC); ok {
+		for number := from; number <= to; number++ {
+			if number == to {
+				headers[number] = endHeader
+				hashes[number] = beforeEndHash
+				continue
+			}
+			hash, header, err := s.canonicalHeaderByNumber(ctx, canonical, new(big.Int).SetUint64(number))
+			if err != nil {
+				return nil, nil, core.Checkpoint{}, fmt.Errorf("verify block %d: %w", number, err)
+			}
+			headers[number] = header
+			hashes[number] = hash
+		}
+	} else {
+		for number := from; number <= to; number++ {
+			if number == to {
+				headers[number] = endHeader
+				hashes[number] = beforeEndHash
+				continue
+			}
+			header, err := s.headerByNumber(ctx, new(big.Int).SetUint64(number))
+			if err != nil {
+				return nil, nil, core.Checkpoint{}, fmt.Errorf("verify block %d: %w", number, err)
+			}
+			hash, err := s.blockHashByNumber(ctx, new(big.Int).SetUint64(number))
+			if err != nil {
+				return nil, nil, core.Checkpoint{}, fmt.Errorf("verify block %d hash: %w", number, err)
+			}
+			headers[number] = header
+			hashes[number] = hash
+		}
+	}
+	for number := from; number <= to; number++ {
+		if headers[number] == nil {
+			return nil, nil, core.Checkpoint{}, fmt.Errorf("RPC returned no block header for block %d", number)
+		}
+		if hashes[number] == (common.Hash{}) {
+			return nil, nil, core.Checkpoint{}, fmt.Errorf("RPC returned no block hash for block %d", number)
+		}
 	}
 	if hashes[to] != beforeEndHash {
-		return nil, core.Checkpoint{}, fmt.Errorf("chain changed while querying logs for blocks %d-%d", from, to)
+		return nil, nil, core.Checkpoint{}, fmt.Errorf("chain changed while querying logs for blocks %d-%d", from, to)
 	}
 	if expectedParent != "" && from > 0 && headers[from].ParentHash.Hex() != expectedParent {
-		return nil, core.Checkpoint{}, fmt.Errorf("block %d does not descend from persisted checkpoint", from)
+		return nil, nil, core.Checkpoint{}, fmt.Errorf("block %d does not descend from persisted checkpoint", from)
+	}
+	blocks := make([]core.CanonicalBlock, 0, to-from+1)
+	for number := from; ; number++ {
+		if number > from && headers[number].ParentHash != hashes[number-1] {
+			return nil, nil, core.Checkpoint{}, fmt.Errorf("block %d does not descend from block %d", number, number-1)
+		}
+		blocks = append(blocks, core.CanonicalBlock{ChainID: s.options.ChainID, Number: number, Hash: hashes[number].Hex(), ParentHash: headers[number].ParentHash.Hex()})
+		if number == to {
+			break
+		}
 	}
 	for _, log := range logs {
 		if log.BlockHash != hashes[log.BlockNumber] {
-			return nil, core.Checkpoint{}, fmt.Errorf("block hash changed while scanning block %d", log.BlockNumber)
+			return nil, nil, core.Checkpoint{}, fmt.Errorf("block hash changed while scanning block %d", log.BlockNumber)
 		}
+	}
+	if observer, ok := s.observer.(BatchVerificationObserver); ok {
+		observer.BatchVerified(s.options.ListenerID, s.options.ChainID, from, to, time.Since(verifyStarted))
 	}
 
 	raw, err := deduplicate(s.options.ChainID, logs)
 	if err != nil {
-		return nil, core.Checkpoint{}, err
+		return nil, nil, core.Checkpoint{}, err
 	}
 	checkpoint := core.Checkpoint{
 		ChainID: s.options.ChainID, BlockNumber: to, BlockHash: hashes[to].Hex(),
 	}
-	return raw, checkpoint, nil
+	return raw, blocks, checkpoint, nil
+}
+
+func (s *Scanner) canonicalHeaderByNumber(ctx context.Context, rpc canonicalHeaderRPC, number *big.Int) (common.Hash, *types.Header, error) {
+	var hash, parent common.Hash
+	var err error
+	err = s.retry(ctx, "block_header", func() error {
+		requestCtx, cancel := context.WithTimeout(ctx, s.options.RPCTimeout)
+		defer cancel()
+		hash, parent, err = rpc.CanonicalHeaderByNumber(requestCtx, number)
+		if err == nil && hash == (common.Hash{}) {
+			err = errors.New("RPC returned an empty block hash")
+		}
+		return err
+	})
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	return hash, &types.Header{Number: new(big.Int).Set(number), ParentHash: parent}, nil
 }
 
 func matchesFilter(log types.Log, query ethereum.FilterQuery) bool {
@@ -479,7 +691,7 @@ func (s *Scanner) verifyChainID(ctx context.Context) error {
 func (s *Scanner) retry(ctx context.Context, operationName string, operation func() error) error {
 	var err error
 	for attempt := 0; attempt < s.options.RetryAttempts; attempt++ {
-		if err = operation(); err == nil {
+		if err = s.withVerificationLimit(ctx, operation); err == nil {
 			s.observer.RPCRequest(s.options.ListenerID, s.options.ChainID, operationName, "success")
 			return nil
 		}
@@ -493,6 +705,24 @@ func (s *Scanner) retry(ctx context.Context, operationName string, operation fun
 		}
 	}
 	return err
+}
+
+func (s *Scanner) withVerificationLimit(ctx context.Context, operation func() error) error {
+	limit := s.options.VerificationConcurrency
+	if limit <= 0 {
+		limit = 1
+	}
+	sem := s.options.VerificationLimiter
+	if sem == nil {
+		sem = make(chan struct{}, limit)
+	}
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-sem }()
+	return operation()
 }
 
 func rpcRetryDelay(base time.Duration, attempt int) time.Duration {

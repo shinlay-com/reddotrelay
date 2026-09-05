@@ -13,6 +13,10 @@ type EventStore interface {
 	SaveEventsAndCheckpoint(context.Context, []core.Event, []core.Delivery, core.Checkpoint) error
 }
 
+type canonicalEventStore interface {
+	SaveCanonicalBatch(context.Context, []core.Event, []core.Delivery, []core.CanonicalBlock, core.Checkpoint, uint64) error
+}
+
 type RoutedDecoder interface {
 	core.Decoder
 	Destinations(core.Event) ([]core.WebhookDestination, error)
@@ -29,6 +33,14 @@ func NewProcessor(decoder RoutedDecoder, store EventStore) *Processor {
 }
 
 func (p *Processor) ProcessBatch(ctx context.Context, logs []core.RawLog, checkpoint core.Checkpoint) error {
+	return p.process(ctx, logs, nil, checkpoint, 0)
+}
+
+func (p *Processor) ProcessCanonicalBatch(ctx context.Context, logs []core.RawLog, blocks []core.CanonicalBlock, checkpoint core.Checkpoint, retain uint64) error {
+	return p.process(ctx, logs, blocks, checkpoint, retain)
+}
+
+func (p *Processor) process(ctx context.Context, logs []core.RawLog, blocks []core.CanonicalBlock, checkpoint core.Checkpoint, retain uint64) error {
 	events := make([]core.Event, 0, len(logs))
 	deliveries := make([]core.Delivery, 0, len(logs))
 	for _, raw := range logs {
@@ -50,7 +62,13 @@ func (p *Processor) ProcessBatch(ctx context.Context, logs []core.RawLog, checkp
 			})
 		}
 	}
-	if err := p.store.SaveEventsAndCheckpoint(ctx, events, deliveries, checkpoint); err != nil {
+	var err error
+	if store, ok := p.store.(canonicalEventStore); ok && blocks != nil {
+		err = store.SaveCanonicalBatch(ctx, events, deliveries, blocks, checkpoint, retain)
+	} else {
+		err = p.store.SaveEventsAndCheckpoint(ctx, events, deliveries, checkpoint)
+	}
+	if err != nil {
 		return fmt.Errorf("persist decoded batch: %w", err)
 	}
 	return nil

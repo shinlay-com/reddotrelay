@@ -4,7 +4,7 @@ $go = Get-Command go -ErrorAction SilentlyContinue
 if ($null -eq $go) {
     $installedGo = "C:\Program Files\Go\bin\go.exe"
     if (-not (Test-Path -LiteralPath $installedGo)) {
-        throw "Go was not found. Install Go 1.25 or add its bin directory to PATH."
+        throw "Go was not found. Install Go 1.27.1 or add its bin directory to PATH."
     }
     $goPath = $installedGo
     $gofmtPath = "C:\Program Files\Go\bin\gofmt.exe"

@@ -96,6 +96,15 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     block_hash TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS canonical_blocks (
+    chain_id INTEGER NOT NULL,
+    block_number INTEGER NOT NULL CHECK (block_number >= 0),
+    block_hash TEXT NOT NULL,
+    parent_hash TEXT NOT NULL,
+    PRIMARY KEY (chain_id, block_number)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS canonical_blocks_hash_idx ON canonical_blocks(chain_id, block_hash);
+
 CREATE TABLE IF NOT EXISTS retention_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     enabled INTEGER NOT NULL,
@@ -329,6 +338,34 @@ CREATE TABLE IF NOT EXISTS delivery_requeue_audit (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS delivery_requeue_audit_created_idx ON delivery_requeue_audit (sequence DESC);
+
+CREATE TABLE IF NOT EXISTS backfill_jobs (
+ id TEXT PRIMARY KEY, rpc_listener_id TEXT NOT NULL, chain_id INTEGER NOT NULL, mode TEXT NOT NULL CHECK(mode='backfill-missing'),
+ from_block INTEGER NOT NULL, to_block INTEGER NOT NULL, next_block INTEGER NOT NULL,
+ contract_ids TEXT NOT NULL, event_ids TEXT NOT NULL, config_revision INTEGER NOT NULL, snapshot BLOB NOT NULL, destinations TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('queued','running','paused','completed','failed','cancelled')),
+ processed_blocks INTEGER NOT NULL DEFAULT 0, discovered_events INTEGER NOT NULL DEFAULT 0, created_events INTEGER NOT NULL DEFAULT 0,
+ created_deliveries INTEGER NOT NULL DEFAULT 0, duplicates INTEGER NOT NULL DEFAULT 0, failure_summary TEXT NOT NULL DEFAULT '',
+ created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, started_at INTEGER, completed_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS backfill_one_active_listener_idx ON backfill_jobs(rpc_listener_id) WHERE state IN ('queued','running','paused');
+CREATE INDEX IF NOT EXISTS backfill_jobs_created_idx ON backfill_jobs(created_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS backfill_audit (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, job_id TEXT NOT NULL, actor_id TEXT NOT NULL, actor_name TEXT NOT NULL,
+ actor_role TEXT NOT NULL CHECK(actor_role='admin'), action TEXT NOT NULL, created_at INTEGER NOT NULL,
+ FOREIGN KEY(job_id) REFERENCES backfill_jobs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS backfill_audit_idx ON backfill_audit(sequence DESC);
+
+CREATE TABLE IF NOT EXISTS scanner_skip_audit (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+ rpc_listener_id TEXT NOT NULL, chain_id INTEGER NOT NULL,
+ actor_id TEXT NOT NULL, actor_name TEXT NOT NULL, actor_role TEXT NOT NULL CHECK(actor_role='admin'),
+ previous_block INTEGER, previous_hash TEXT NOT NULL, from_block INTEGER NOT NULL,
+ to_block INTEGER NOT NULL, block_hash TEXT NOT NULL, parent_hash TEXT NOT NULL,
+ config_revision INTEGER NOT NULL, created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS scanner_skip_audit_listener_idx ON scanner_skip_audit(rpc_listener_id,sequence DESC);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("initialize SQLite schema: %w", err)
@@ -540,6 +577,14 @@ func (s *Store) ensureDeliveryColumn(ctx context.Context, name, definition strin
 }
 
 func (s *Store) SaveEventsAndCheckpoint(ctx context.Context, events []core.Event, deliveries []core.Delivery, checkpoint core.Checkpoint) (err error) {
+	return s.saveBatch(ctx, events, deliveries, nil, checkpoint, 0)
+}
+
+func (s *Store) SaveCanonicalBatch(ctx context.Context, events []core.Event, deliveries []core.Delivery, blocks []core.CanonicalBlock, checkpoint core.Checkpoint, retain uint64) (err error) {
+	return s.saveBatch(ctx, events, deliveries, blocks, checkpoint, retain)
+}
+
+func (s *Store) saveBatch(ctx context.Context, events []core.Event, deliveries []core.Delivery, blocks []core.CanonicalBlock, checkpoint core.Checkpoint, retain uint64) (err error) {
 	if err := validUint64(checkpoint.ChainID, checkpoint.BlockNumber); err != nil {
 		return err
 	}
@@ -576,6 +621,14 @@ func (s *Store) SaveEventsAndCheckpoint(ctx context.Context, events []core.Event
 			return err
 		}
 	}
+	for _, block := range blocks {
+		if block.ChainID != checkpoint.ChainID || block.Hash == "" || block.ParentHash == "" {
+			return errors.New("invalid canonical block")
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO canonical_blocks(chain_id,block_number,block_hash,parent_hash) VALUES(?,?,?,?) ON CONFLICT(chain_id,block_number) DO UPDATE SET block_hash=excluded.block_hash,parent_hash=excluded.parent_hash`, block.ChainID, block.Number, block.Hash, block.ParentHash); err != nil {
+			return fmt.Errorf("save canonical block %d: %w", block.Number, err)
+		}
+	}
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO checkpoints (chain_id, block_number, block_hash) VALUES (?, ?, ?)
 ON CONFLICT(chain_id) DO UPDATE SET
@@ -586,10 +639,62 @@ WHERE excluded.block_number >= checkpoints.block_number`,
 	if err != nil {
 		return fmt.Errorf("save checkpoint: %w", err)
 	}
+	if retain > 0 && checkpoint.BlockNumber+1 > retain {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM canonical_blocks WHERE chain_id=? AND block_number < ?`, checkpoint.ChainID, checkpoint.BlockNumber+1-retain); err != nil {
+			return fmt.Errorf("prune canonical history: %w", err)
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit persistence transaction: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) CanonicalBlocks(ctx context.Context, chainID, limit uint64) ([]core.CanonicalBlock, error) {
+	if limit == 0 || limit > 100000 {
+		return nil, errors.New("canonical history limit is invalid")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT chain_id,block_number,block_hash,parent_hash FROM canonical_blocks WHERE chain_id=? ORDER BY block_number DESC LIMIT ?`, chainID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("load canonical history: %w", err)
+	}
+	defer rows.Close()
+	var result []core.CanonicalBlock
+	for rows.Next() {
+		var b core.CanonicalBlock
+		if err := rows.Scan(&b.ChainID, &b.Number, &b.Hash, &b.ParentHash); err != nil {
+			return nil, err
+		}
+		result = append(result, b)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) RewindCanonical(ctx context.Context, chainID, from uint64, ancestorHash string) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM events WHERE chain_id=? AND block_number>=?`, chainID, from); err != nil {
+		return fmt.Errorf("delete orphaned events: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM canonical_blocks WHERE chain_id=? AND block_number>=?`, chainID, from); err != nil {
+		return fmt.Errorf("delete orphaned history: %w", err)
+	}
+	if from == 0 {
+		_, err = tx.ExecContext(ctx, `DELETE FROM checkpoints WHERE chain_id=?`, chainID)
+	} else {
+		_, err = tx.ExecContext(ctx, `UPDATE checkpoints SET block_number=?,block_hash=? WHERE chain_id=?`, from-1, ancestorHash, chainID)
+	}
+	if err != nil {
+		return fmt.Errorf("rewind checkpoint: %w", err)
+	}
+	return tx.Commit()
 }
 
 func insertEvent(ctx context.Context, tx *sql.Tx, event core.Event) (bool, error) {
@@ -750,6 +855,9 @@ func (s *Store) ResetFrom(ctx context.Context, chainID, block uint64) (err error
 	if _, err = tx.ExecContext(ctx,
 		`DELETE FROM events WHERE chain_id = ? AND block_number >= ?`, chainID, block); err != nil {
 		return fmt.Errorf("delete reset events: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM canonical_blocks WHERE chain_id=? AND block_number>=?`, chainID, block); err != nil {
+		return fmt.Errorf("delete reset canonical history: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM checkpoints WHERE chain_id = ?`, chainID)
 	if err != nil {

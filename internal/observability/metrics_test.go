@@ -51,3 +51,15 @@ func TestMetricsExposeBoundedOperationalState(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsUseInitialCheckpointForLag(t *testing.T) {
+	m := New(nil, "test")
+	m.CheckpointLoaded("listener-1", 1, 1_030_032)
+	m.Head("listener-1", 1, 1_052_937, 1_052_925)
+
+	response := httptest.NewRecorder()
+	m.Handler().ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(response.Body.String(), `reddotrelay_scanner_lag_blocks{chain_id="1",rpc_listener_id="listener-1"} 22893`) {
+		t.Fatalf("initial scanner lag was not reported: %s", response.Body.String())
+	}
+}

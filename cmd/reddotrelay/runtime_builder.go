@@ -22,7 +22,7 @@ import (
 )
 
 func buildScannerRuntime(store *sqlite.Store, logger *slog.Logger) scannerRuntimeBuilder {
-	return buildScannerRuntimeWithObservers(store, logger, secrets.New(), nil)
+	return buildScannerRuntimeWithObservers(store, logger, secrets.New(), nil, 8, nil)
 }
 
 type secretValueResolver interface {
@@ -30,10 +30,10 @@ type secretValueResolver interface {
 }
 
 func buildScannerRuntimeWithResolver(store *sqlite.Store, logger *slog.Logger, resolver secretValueResolver) scannerRuntimeBuilder {
-	return buildScannerRuntimeWithObservers(store, logger, resolver, nil)
+	return buildScannerRuntimeWithObservers(store, logger, resolver, nil, 8, nil)
 }
 
-func buildScannerRuntimeWithObservers(store *sqlite.Store, logger *slog.Logger, resolver secretValueResolver, observer scanner.Observer) scannerRuntimeBuilder {
+func buildScannerRuntimeWithObservers(store *sqlite.Store, logger *slog.Logger, resolver secretValueResolver, observer scanner.Observer, verificationConcurrency int, verificationLimiter chan struct{}) scannerRuntimeBuilder {
 	return func(ctx context.Context, snapshot core.RPCListenerSnapshot, listener core.RPCListener) (*scannerRuntime, error) {
 		specs := make([]decoder.ContractSpec, 0, len(listener.Contracts))
 		for _, contract := range listener.Contracts {
@@ -85,6 +85,7 @@ func buildScannerRuntimeWithObservers(store *sqlite.Store, logger *slog.Logger, 
 			ListenerID: listener.ID, ChainID: listener.ChainID, StartBlock: listener.StartBlock, BatchSize: listener.BatchSize,
 			Confirmations: listener.Confirmations, ReorgDepth: listener.ReorgDepth, PollInterval: listener.PollInterval,
 			RetryAttempts: listener.RPCRetryAttempts, RetryBackoff: listener.RPCRetryBackoff, RPCTimeout: listener.RPCTimeout,
+			VerificationConcurrency: verificationConcurrency, VerificationLimiter: verificationLimiter,
 			Addresses: decoded.Addresses(), Topics: [][]common.Hash{decoded.Topic0()},
 		}, logger, observer)
 		if err != nil {

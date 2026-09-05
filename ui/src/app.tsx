@@ -7,6 +7,7 @@ import { ListenersPage } from "./listeners-page";
 import { StoragePage } from "./storage-page";
 import { UsersPage } from "./users-page";
 import { APIKeysPage } from "./api-keys-page";
+import { BackfillsPage } from "./backfills-page";
 import { deriveEngineStatus } from "./dashboard-status";
 import logoWordmark from "./assets/reddotrelay-wordmark.png";
 import "./styles.css";
@@ -263,6 +264,7 @@ function Dashboard({ session, data, error, refreshing, onRefresh, onLogout, busy
     { id: "deliveries", icon: "⇢", label: "Events & deliveries" },
     { id: "listeners", icon: "⌁", label: "RPC listeners", count: listenerCount },
     { id: "activity", icon: "◷", label: "Activity" }
+    ,{ id: "backfills", icon: "↶", label: "Backfills" }
     ,{ id: "storage", icon: "▣", label: "Storage & retention" }
     ,{ id: "users", icon: "◎", label: "Users" }
     ,{ id: "api-keys", icon: "⌘", label: "API keys" }
@@ -313,7 +315,7 @@ function Dashboard({ session, data, error, refreshing, onRefresh, onLogout, busy
       {navigationFlyout && <button class="navigation-scrim" type="button" aria-label="Close navigation menu" onClick={() => setNavigationFlyout(false)} />}
       <main class="console">
       {error && <p class="alert" role="alert">{error}</p>}
-      {configurationView && !data ? <section class="panel loading" role="status">{refreshing ? "Loading view…" : "View data is unavailable."}</section> : activeSection === "overview" && data ? <Overview data={data} sessionName={session.name} onRefresh={onRefresh} refreshing={refreshing} /> : activeSection === "listeners" && data ? <ListenersPage session={session} snapshot={data.snapshot} runtimeListeners={runtimeListeners} onChanged={onRefresh} /> : activeSection === "deliveries" ? <DeliveryOperations session={session} listeners={listeners} runtimeListeners={runtimeListeners} /> : activeSection === "activity" ? <ActivityPanel session={session} /> : activeSection === "storage" ? <StoragePage session={session}/> : activeSection === "users" ? <UsersPage session={session}/> : activeSection === "api-keys" ? <APIKeysPage session={session}/> : null}
+      {configurationView && !data ? <section class="panel loading" role="status">{refreshing ? "Loading view…" : "View data is unavailable."}</section> : activeSection === "overview" && data ? <Overview data={data} sessionName={session.name} onRefresh={onRefresh} refreshing={refreshing} /> : activeSection === "listeners" && data ? <ListenersPage session={session} snapshot={data.snapshot} runtimeListeners={runtimeListeners} onChanged={onRefresh} /> : activeSection === "deliveries" ? <DeliveryOperations session={session} listeners={listeners} runtimeListeners={runtimeListeners} /> : activeSection === "backfills" ? <BackfillsPage session={session} listeners={listeners}/> : activeSection === "activity" ? <ActivityPanel session={session} /> : activeSection === "storage" ? <StoragePage session={session}/> : activeSection === "users" ? <UsersPage session={session}/> : activeSection === "api-keys" ? <APIKeysPage session={session}/> : null}
       </main>
     </div>
   );

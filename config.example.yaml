@@ -15,6 +15,13 @@ log:
 storage:
   path: /var/lib/reddotrelay/reddotrelay.db
 
+backfill:
+  max_range: 100000
+  poll_interval: 500ms
+
+# Maximum concurrent block-header verification RPCs shared by all listeners.
+verification_concurrency: 8
+
 # Required only when admin-managed RPC credentials are configured.
 # security:
 #   rpc_credentials_key_ref: env://REDDOTRELAY_RPC_CREDENTIALS_KEY

@@ -12,13 +12,20 @@ import (
 )
 
 type Config struct {
-	Environment EnvironmentConfig `yaml:"environment"`
-	Server      ServerConfig      `yaml:"server"`
-	Log         LogConfig         `yaml:"log"`
-	Storage     StorageConfig     `yaml:"storage"`
-	Delivery    DeliveryConfig    `yaml:"delivery"`
-	Retention   RetentionConfig   `yaml:"retention"`
-	Security    SecurityConfig    `yaml:"security"`
+	Environment             EnvironmentConfig `yaml:"environment"`
+	Server                  ServerConfig      `yaml:"server"`
+	Log                     LogConfig         `yaml:"log"`
+	Storage                 StorageConfig     `yaml:"storage"`
+	Delivery                DeliveryConfig    `yaml:"delivery"`
+	Retention               RetentionConfig   `yaml:"retention"`
+	Backfill                BackfillConfig    `yaml:"backfill"`
+	VerificationConcurrency int               `yaml:"verification_concurrency"`
+	Security                SecurityConfig    `yaml:"security"`
+}
+
+type BackfillConfig struct {
+	MaxRange     uint64        `yaml:"max_range"`
+	PollInterval time.Duration `yaml:"poll_interval"`
 }
 
 type SecurityConfig struct {
@@ -70,6 +77,15 @@ func Load(path string) (Config, error) {
 	}
 	applyDeliveryDefaults(&cfg.Delivery)
 	applyRetentionDefaults(&cfg.Retention)
+	if cfg.Backfill.MaxRange == 0 {
+		cfg.Backfill.MaxRange = 100000
+	}
+	if cfg.Backfill.PollInterval == 0 {
+		cfg.Backfill.PollInterval = 500 * time.Millisecond
+	}
+	if cfg.VerificationConcurrency == 0 {
+		cfg.VerificationConcurrency = 8
+	}
 	cfg.Storage.Path = os.ExpandEnv(cfg.Storage.Path)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -169,6 +185,12 @@ func (c Config) Validate() error {
 		(c.Retention.DeliveredFor == 0 && (c.Retention.PollInterval != 0 || c.Retention.BatchSize != 0)) ||
 		(c.Retention.DeliveredFor > 0 && (c.Retention.PollInterval <= 0 || c.Retention.BatchSize <= 0)) {
 		return errors.New("retention settings are invalid")
+	}
+	if c.Backfill.MaxRange == 0 || c.Backfill.MaxRange > 10000000 || c.Backfill.PollInterval <= 0 {
+		return errors.New("backfill settings are invalid")
+	}
+	if c.VerificationConcurrency <= 0 || c.VerificationConcurrency > 128 {
+		return errors.New("verification_concurrency must be between 1 and 128")
 	}
 	if ref := strings.TrimSpace(c.Security.RPCCredentialsKeyRef); ref != "" && !(strings.HasPrefix(ref, "env://") || strings.HasPrefix(ref, "file:///")) {
 		return errors.New("security.rpc_credentials_key_ref must be an env:// or file:/// reference")
