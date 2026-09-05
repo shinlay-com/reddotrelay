@@ -40,7 +40,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	store := &Store{db: db, path: path, rpcListenerChanges: make(chan struct{}, 1)}
-	if err := store.initialize(ctx); err != nil {
+	if err := store.initializeWithRetry(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -58,6 +58,27 @@ func connectionDSN(path string) string {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
+func (s *Store) initializeWithRetry(ctx context.Context) error {
+	const attempts = 5
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		err = s.initialize(ctx)
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "database is locked") {
+			return err
+		}
+		if attempt == attempts-1 {
+			break
+		}
+		delay := time.Duration(attempt+1) * 250 * time.Millisecond
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return err
+}
 
 func (s *Store) DeliveryStatusCounts(ctx context.Context) (pending, delivered, dead int64, err error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM deliveries GROUP BY status`)
@@ -86,7 +107,8 @@ func (s *Store) DeliveryStatusCounts(ctx context.Context) (pending, delivered, d
 func (s *Store) initialize(ctx context.Context) error {
 	const schema = `
 PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
+-- Rollback journaling is compatible with local disks and network-backed Azure Files.
+PRAGMA journal_mode = DELETE;
 PRAGMA synchronous = FULL;
 PRAGMA busy_timeout = 5000;
 
